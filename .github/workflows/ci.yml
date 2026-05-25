@@ -24,7 +24,7 @@ jobs:
     # quokka is a macOS tool (it talks to usbmuxd); CI runs on macOS to match.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # rust-toolchain.toml pins the channel; this action honors it and
       # installs the rustfmt + clippy components it lists.
@@ -59,7 +59,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo audit
