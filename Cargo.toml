@@ -60,7 +60,7 @@ anstream = "0.6"
 indicatif = "0.17"
 # Confirm prompt after TUI selection. MultiSelect was replaced by the
 # ratatui-based picker (live size updates during Phase 2 enrichment).
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 # Live-updating multi-select TUI for `qk apps` — items render with static
 # sizes immediately, then refresh as Phase 2 enrichment streams in.
 ratatui = "0.29"
