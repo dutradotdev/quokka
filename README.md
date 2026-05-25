@@ -25,6 +25,13 @@ qk
 With no arguments, `qk` opens the interactive launcher. See [Install](#install)
 below for `curl` and `cargo` alternatives.
 
+## Demo
+
+<video src="https://github.com/dutradotdev/quokka/releases/download/assets-v1/quokka-demo.mov" controls muted width="720">
+  Watch the demo:
+  <a href="https://github.com/dutradotdev/quokka/releases/download/assets-v1/quokka-demo.mov">quokka-demo.mov</a>
+</video>
+
 ## Dashboard preview
 
 Run `quokka` with no arguments and you get a live device dashboard plus an
