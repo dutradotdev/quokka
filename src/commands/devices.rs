@@ -11,12 +11,17 @@ use crate::device::{list_devices, DeviceListing};
 pub async fn run() -> Result<()> {
     let listings = list_devices().await?;
     let mut out = anstream::stdout();
-    if listings.is_empty() {
-        writeln!(out, "No iPhones connected.")?;
-        return Ok(());
-    }
-    write!(out, "{}", render(&listings))?;
+    write!(out, "{}", format_listings(&listings))?;
     Ok(())
+}
+
+/// Pure formatter shared by `run` and the unit tests: yields the
+/// "No iPhones connected." line when empty, otherwise the columnar render.
+pub fn format_listings(listings: &[DeviceListing]) -> String {
+    if listings.is_empty() {
+        return "No iPhones connected.\n".to_string();
+    }
+    render(listings)
 }
 
 pub fn render(listings: &[DeviceListing]) -> String {
@@ -73,6 +78,18 @@ mod tests {
             model_identifier: Some(model.into()),
             model_friendly: Some(friendly.into()),
         }
+    }
+
+    #[test]
+    fn format_listings_empty_prints_no_iphones_message() {
+        let out = format_listings(&[]);
+        assert_eq!(out, "No iPhones connected.\n");
+    }
+
+    #[test]
+    fn format_listings_non_empty_delegates_to_render() {
+        let listings = [paired("UDID-1", "X", "iPhone16,2", "iPhone 15 Pro Max")];
+        assert_eq!(format_listings(&listings), render(&listings));
     }
 
     #[test]

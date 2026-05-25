@@ -303,6 +303,29 @@ fn analyze_top_n_picks_heaviest_files() {
     assert_eq!(top[1].path, "/Downloads/big.pdf");
 }
 
+#[tokio::test]
+async fn analyze_top_zero_does_not_panic_through_run() {
+    let fake = FakeDevice {
+        media: sample_media(),
+        ..Default::default()
+    };
+    commands::analyze::run(&fake, 0, false)
+        .await
+        .expect("top=0 read-only run must succeed");
+}
+
+#[tokio::test]
+async fn analyze_top_larger_than_files_saturates_through_run() {
+    let fake = FakeDevice {
+        media: sample_media(),
+        ..Default::default()
+    };
+    commands::analyze::run(&fake, 999_999, false)
+        .await
+        .expect("top > files should saturate, not error");
+    assert!(fake.deleted().is_empty());
+}
+
 // ---------- info ----------
 
 #[tokio::test]

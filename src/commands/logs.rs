@@ -231,7 +231,7 @@ pub mod parser {
     }
 }
 
-mod plain {
+pub(crate) mod plain {
     use super::*;
 
     pub async fn run(
@@ -1204,6 +1204,81 @@ mod tests {
         );
         // No PID → no `[...]` suffix on the process token.
         assert!(!out.contains("p["));
+    }
+
+    #[tokio::test]
+    async fn plain_mode_writes_filtered_lines_to_save_path() {
+        // Behavior contract for `--save`: only entries that pass the filter
+        // are written; output is plain (no ANSI) and one-line-per-entry.
+        use std::io::Read;
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<LogEntry>>(8);
+        tx.send(Ok(entry("SpringBoard", LogLevel::Warning)))
+            .await
+            .unwrap();
+        tx.send(Ok(entry("mediaserverd", LogLevel::Warning)))
+            .await
+            .unwrap();
+        tx.send(Ok(entry("SpringBoard", LogLevel::Info)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let path = std::env::temp_dir().join(format!(
+            "quokka-logs-save-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let opts = Options {
+            no_tui: true,
+            min_level: LogLevel::Warning,
+            process_filter: Some("springboard".into()),
+            save_path: Some(path.clone()),
+        };
+        plain::run(rx, opts)
+            .await
+            .expect("plain run should succeed");
+
+        let mut content = String::new();
+        std::fs::File::open(&path)
+            .expect("save file should exist")
+            .read_to_string(&mut content)
+            .unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the SpringBoard Warning entry passes both filters"
+        );
+        assert!(lines[0].contains("SpringBoard"));
+        assert!(lines[0].contains("<Warning>"));
+        assert!(
+            !content.contains('\u{1b}'),
+            "save file must be plain text, found ANSI escape"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn plain_mode_no_save_does_not_create_file() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<LogEntry>>(1);
+        tx.send(Ok(entry("p", LogLevel::Notice))).await.unwrap();
+        drop(tx);
+        plain::run(
+            rx,
+            Options {
+                no_tui: true,
+                min_level: LogLevel::Debug,
+                process_filter: None,
+                save_path: None,
+            },
+        )
+        .await
+        .expect("plain run with no save should succeed");
     }
 
     #[test]
