@@ -27,10 +27,7 @@ below for `curl` and `cargo` alternatives.
 
 ## Demo
 
-<video src="https://github.com/dutradotdev/quokka/releases/download/assets-v1/quokka-demo.mov" controls muted width="720">
-  Watch the demo:
-  <a href="https://github.com/dutradotdev/quokka/releases/download/assets-v1/quokka-demo.mov">quokka-demo.mov</a>
-</video>
+![quokka demo](docs/demo.gif)
 
 ## Dashboard preview
 
