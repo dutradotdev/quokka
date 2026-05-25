@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "cargo fmt + clippy + test",
+            "timeout": 300,
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); [ -z \"$f\" ] && exit 0; rel=\"${f#$PWD/}\"; case \"$rel\" in src/*.rs|tests/*.rs|Cargo.toml) ;; *) exit 0 ;; esac; out=$(cargo fmt 2>&1 && cargo clippy --all-targets -- -D warnings 2>&1 && cargo test 2>&1) || { echo \"$out\" >&2; exit 2; }; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

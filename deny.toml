@@ -1,0 +1,50 @@
+# cargo-deny configuration — policy enforced in CI (`audit` job in
+# .github/workflows/ci.yml). Keep this list narrow; every entry is a
+# decision worth defending.
+
+[graph]
+# quokka only ships for macOS x86_64 + aarch64. Restricting cargo-deny to
+# those targets skips false-positives from linux/windows-only deps that
+# never end up in our binary.
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+
+[advisories]
+# Versions sourced from rustsec/advisory-db at audit time.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Explicit allow-list — any license outside this list fails CI so a new
+# transitive dep with a copyleft or unclear license can't slip in silently.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Duplicate versions of the same crate inflate the binary; warn so we
+# notice but don't fail (one duplicate during a transitive bump is normal).
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# Block any future accidental git or registry dependency outside crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

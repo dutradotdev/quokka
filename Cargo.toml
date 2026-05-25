@@ -1,0 +1,95 @@
+[package]
+name = "quokka-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI to inspect and tidy an iPhone connected over USB to a Mac."
+license = "MIT"
+repository = "https://github.com/dutradotdev/quokka"
+homepage = "https://github.com/dutradotdev/quokka"
+readme = "README.md"
+keywords = ["ios", "iphone", "cli", "idevice", "usbmuxd"]
+categories = ["command-line-utilities"]
+# Disable bin auto-discovery so we control both `quokka` and `qk` explicitly.
+autobins = false
+
+[lib]
+name = "quokka_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "quokka"
+path = "src/bin/quokka.rs"
+
+[[bin]]
+name = "qk"
+path = "src/bin/qk.rs"
+
+[features]
+default = []
+# Enables tests that require a real iPhone connected via USB. Not run in CI.
+e2e = []
+
+[dependencies]
+# Pinned with `=` — the idevice crate warns of breaking changes at every point
+# release until 0.2.0. Re-run Prompt 0's research before bumping.
+idevice = { version = "=0.1.61", default-features = false, features = [
+    # Crypto backend for lockdown TLS. `aws-lc` is upstream's default; it
+    # implies `rustls`. The other option would be `ring`.
+    "aws-lc",
+    "usbmuxd",
+    "diagnostics_relay",
+    "afc",
+    "installation_proxy",
+    "syslog_relay",
+] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+async-trait = "0.1"
+# `FuturesUnordered` for bounded-concurrency batched lookups.
+futures = "0.3"
+# Used directly to type plist values returned from `idevice` (which depends
+# on the same major version transitively).
+plist = "1"
+
+# UX libs — chosen once here so every command stays consistent.
+# anstream auto-detects TTY and strips ANSI when piped; owo-colors composes on top.
+owo-colors = { version = "4", features = ["supports-colors"] }
+anstream = "0.6"
+indicatif = "0.17"
+# Confirm prompt after TUI selection. MultiSelect was replaced by the
+# ratatui-based picker (live size updates during Phase 2 enrichment).
+dialoguer = { version = "0.11", default-features = false }
+# Live-updating multi-select TUI for `qk apps` — items render with static
+# sizes immediately, then refresh as Phase 2 enrichment streams in.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+# Generate this profile section with `dist init`; it controls the release
+# binary's size + speed when shipped via Homebrew / curl installer.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# A GitHub repo to push Homebrew formulas to
+tap = "dutradotdev/homebrew-tap"
+# Publish jobs to run in CI
+publish-jobs = ["homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false

@@ -1,0 +1,53 @@
+name: Bug report
+description: Something quokka did wrong, or an error you couldn't act on.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. quokka only supports an iPhone connected over
+        USB to a Mac — please confirm that setup before reporting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what went wrong?
+      placeholder: |
+        Ran `qk analyze`. It exited with "Could not open AFC ..." but the
+        iPhone was unlocked.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Exact command
+      placeholder: qk apps --uninstall com.example.app
+    validations:
+      required: true
+  - type: input
+    id: quokka-version
+    attributes:
+      label: quokka version
+      description: Output of `quokka --version`.
+    validations:
+      required: true
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version of the connected iPhone
+      placeholder: "18.2"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "Sonoma 14.5"
+    validations:
+      required: true

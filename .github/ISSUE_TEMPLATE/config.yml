@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/dutradotdev/quokka/discussions
+    about: Ask a question or float an idea before opening a formal issue.
