@@ -56,7 +56,7 @@ plist = "1"
 # UX libs — chosen once here so every command stays consistent.
 # anstream auto-detects TTY and strips ANSI when piped; owo-colors composes on top.
 owo-colors = { version = "4", features = ["supports-colors"] }
-anstream = "0.6"
+anstream = "1.0"
 indicatif = "0.17"
 # Confirm prompt after TUI selection. MultiSelect was replaced by the
 # ratatui-based picker (live size updates during Phase 2 enrichment).
