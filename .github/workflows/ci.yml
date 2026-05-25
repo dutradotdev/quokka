@@ -1,0 +1,72 @@
+name: CI
+
+# Regression gate: every push and pull request to `main` must build cleanly,
+# pass formatting and clippy, and pass the full unit + integration suite.
+# The `e2e` tests need a physical iPhone, so they are compile-checked here
+# but never executed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-progress run when the same branch/PR is pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    # quokka is a macOS tool (it talks to usbmuxd); CI runs on macOS to match.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel; this action honors it and
+      # installs the rustfmt + clippy components it lists.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit + integration tests
+        run: cargo test --all-targets
+
+      - name: Doc tests
+        run: cargo test --doc
+
+      # The `e2e` tests cannot run without an iPhone, but a broken e2e test
+      # file should still fail CI — so compile-check it without running.
+      - name: Compile-check e2e tests
+        run: cargo test --features e2e --no-run
+
+  # Supply-chain hygiene: cargo-audit catches CVEs in transitive deps,
+  # cargo-deny enforces license + duplicate-version policy from `deny.toml`.
+  # Runs in parallel with the test job so it doesn't slow regression feedback.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources

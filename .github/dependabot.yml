@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Rust deps. The `idevice` crate is intentionally pinned to `=0.1.x` — see
+  # CLAUDE.md for the API-churn rationale — so dependabot will open PRs that
+  # we either close (rejecting the bump until we re-research) or accept along
+  # with a re-test sweep. That's the cost we want, not silent skips.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # Patch-level bumps for trusted libs can be batched into one PR.
+      patch-updates:
+        update-types:
+          - "patch"
+
+  # GitHub Actions versions (the workflow YAMLs).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5

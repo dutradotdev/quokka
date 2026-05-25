@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a capability for quokka.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim the **"What's out of scope"** section of
+        the README. Some requests (per-app cache cleanup, crash logs, full
+        backups, Wi-Fi pairing) are intentionally excluded because iOS makes
+        them impossible from a desktop companion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that quokka can't do today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed solution
+      description: How might quokka address it? A new command, a flag, etc.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I've read the README and this isn't listed as out of scope.
+          required: true
