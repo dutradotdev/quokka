@@ -614,3 +614,160 @@ fn logs_filter_chain_works() {
         &f
     ));
 }
+
+use quokka_cli::device::Packet;
+
+fn sample_pkt(pid: u32, comm: &str, iface: &str, bytes: usize) -> Packet {
+    Packet {
+        pid,
+        comm: comm.into(),
+        epid: 0,
+        ecomm: String::new(),
+        interface: iface.into(),
+        seconds: 1_700_000_000,
+        microseconds: 0,
+        io: 1,
+        data: vec![0u8; bytes],
+    }
+}
+
+#[tokio::test]
+async fn capture_drains_seeded_packets_in_order() {
+    // The FakeDevice replays seeded packets one-per-channel-send; this proves
+    // the seam (trait + receiver wiring) end-to-end without an iPhone.
+    let fake = FakeDevice {
+        seeded_packets: vec![
+            Ok(sample_pkt(1, "a", "en0", 10)),
+            Ok(sample_pkt(2, "b", "pdp_ip0", 20)),
+            Ok(sample_pkt(3, "c", "en0", 30)),
+        ],
+        ..Default::default()
+    };
+    let mut stream = fake.capture_packets().await.unwrap();
+    let mut pids = Vec::new();
+    while let Some(item) = stream.rx.recv().await {
+        pids.push(item.unwrap().pid);
+    }
+    assert_eq!(pids, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn capture_run_respects_max_and_returns_ok() {
+    // Drives commands::capture::run against a fake with more packets than
+    // the --max limit — exercises the early-exit branch in the select loop.
+    let mut seeded = Vec::new();
+    for i in 0..50 {
+        seeded.push(Ok(sample_pkt(i, "proc", "en0", 64)));
+    }
+    let fake = FakeDevice {
+        seeded_packets: seeded,
+        ..Default::default()
+    };
+    let result = commands::capture::run(
+        &fake,
+        commands::capture::Options {
+            max: Some(5),
+            save: None,
+            filter: Default::default(),
+            mode: Default::default(),
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn capture_run_exits_when_stream_closes_without_max() {
+    // No --max, but the seeded stream is finite — verify the command exits
+    // cleanly when the channel closes rather than hanging forever.
+    let fake = FakeDevice {
+        seeded_packets: vec![Ok(sample_pkt(7, "p", "en0", 1))],
+        ..Default::default()
+    };
+    let result = commands::capture::run(
+        &fake,
+        commands::capture::Options {
+            max: None,
+            save: None,
+            filter: Default::default(),
+            mode: Default::default(),
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn capture_run_hosts_mode_terminates_cleanly() {
+    // Hosts aggregator + Stream exit on stream close — verify the mode
+    // dispatch wires through without panicking when the channel ends.
+    let fake = quokka_cli::device::FakeDevice {
+        seeded_packets: vec![Ok(sample_pkt(1, "x", "en0", 64))],
+        ..Default::default()
+    };
+    let result = commands::capture::run(
+        &fake,
+        commands::capture::Options {
+            max: None,
+            save: None,
+            filter: Default::default(),
+            mode: quokka_cli::commands::capture::Mode::Hosts,
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn capture_run_dns_and_sni_modes_terminate_cleanly() {
+    let fake = quokka_cli::device::FakeDevice {
+        seeded_packets: vec![Ok(sample_pkt(1, "x", "en0", 64))],
+        ..Default::default()
+    };
+    for mode in [
+        quokka_cli::commands::capture::Mode::Dns,
+        quokka_cli::commands::capture::Mode::Sni,
+    ] {
+        let result = commands::capture::run(
+            &fake,
+            commands::capture::Options {
+                max: None,
+                save: None,
+                filter: Default::default(),
+                mode,
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "mode {mode:?} should exit Ok");
+    }
+}
+
+#[tokio::test]
+async fn capture_run_with_app_filter_does_not_crash_on_misses() {
+    // The renderer is fire-and-forget at this layer (writes to real
+    // stdout), so we can't capture lines from outside. What we *can*
+    // verify is that run() returns Ok cleanly when filters reject every
+    // packet — no crash, no infinite loop, no panic on the channel-close
+    // path with `count == 0`.
+    let fake = quokka_cli::device::FakeDevice {
+        seeded_packets: vec![
+            Ok(sample_pkt(1, "Safari", "en0", 64)),
+            Ok(sample_pkt(2, "Mail", "en0", 64)),
+        ],
+        ..Default::default()
+    };
+    let result = commands::capture::run(
+        &fake,
+        commands::capture::Options {
+            max: None,
+            save: None,
+            filter: quokka_cli::commands::capture::Filter {
+                app: Some("instagram".into()),
+                ..Default::default()
+            },
+            mode: Default::default(),
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+}

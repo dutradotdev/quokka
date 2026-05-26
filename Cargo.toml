@@ -53,9 +53,11 @@ idevice = { version = "=0.1.61", default-features = false, features = [
     "afc",
     "installation_proxy",
     "syslog_relay",
+    "pcapd",
+    "rsd",
 ] }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "1"
@@ -82,12 +84,19 @@ dialoguer = { version = "0.11", default-features = false }
 # sizes immediately, then refresh as Phase 2 enrichment streams in.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+# Pure-Rust packet parser (Ethernet / IPv4 / IPv6 / TCP / UDP / ICMP). No C deps.
+etherparse = "0.20"
+# pcap / pcapng read+write. We use the write side (`--save`) — pcapng lets us
+# attach per-packet comments which is how we smuggle pid/comm into Wireshark.
+pcap-file = "2.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # Inline snapshots for render functions — locks in the printed layout so
 # accidental column-width or row-order changes fail loudly.
 insta = "1"
+# Temp files for capture-writer roundtrip tests (write a packet, read it back).
+tempfile = "3"
 
 # Generate this profile section with `dist init`; it controls the release
 # binary's size + speed when shipped via Homebrew / curl installer.

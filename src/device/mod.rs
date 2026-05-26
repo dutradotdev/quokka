@@ -159,6 +159,55 @@ impl LogLevel {
     }
 }
 
+/// Live pcapd capture session.
+///
+/// The seam between producer (`RealDevice`'s pcapd loop) and consumer
+/// (the `capture` command) is intentionally non-blocking on the producer
+/// side. If the consumer falls behind, packets are *dropped* and counted
+/// in `dropped` rather than back-pressuring pcapd — a blocked receiver
+/// inside the device would cause silent upstream loss that we can't
+/// surface to the user.
+pub struct PacketStream {
+    pub rx: tokio::sync::mpsc::Receiver<Result<Packet>>,
+    /// Total packets dropped since the session started, due to channel
+    /// overflow. Renderers should diff this to print periodic notices.
+    pub dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// One packet captured from `com.apple.pcapd`.
+///
+/// The seam exists so the rest of quokka never sees `idevice::pcapd::DevicePacket`
+/// directly — that crate ships breaking changes at every point release until 0.2.0.
+///
+/// `data` is the link-layer payload **after** the idevice crate's `normalize_data`
+/// pass: raw IP packets get a synthetic Ethernet header (ethertype hard-coded to
+/// `0x0800` IPv4 — IPv6 detection is deferred to Phase 2), and cellular `pdp_ip*`
+/// payloads have their first 4 bytes (BSD loopback family) stripped. The whole
+/// blob is therefore safe to feed to an Ethernet parser as link_type 1.
+#[derive(Debug, Clone)]
+pub struct Packet {
+    /// Originating process pid as reported by pcapd.
+    pub pid: u32,
+    /// Originating process name (`proc.comm`, max 16 chars on Darwin).
+    pub comm: String,
+    /// Effective process pid — pcapd reports this when the kernel attributes
+    /// the packet to a delegate (e.g. networkd) on behalf of another process.
+    pub epid: u32,
+    pub ecomm: String,
+    /// Interface name (`en0`, `pdp_ip0`, `lo0`, ...).
+    pub interface: String,
+    /// Device-side capture time (whole seconds part of the Unix epoch).
+    pub seconds: u32,
+    /// Microseconds component, 0..=999_999.
+    pub microseconds: u32,
+    /// Raw `io` byte from the pcapd header. Semantics aren't documented in the
+    /// upstream crate; Phase 1 surfaces it verbatim so we can correlate values
+    /// to direction empirically before Phase 2 turns it into an enum.
+    pub io: u8,
+    /// Ethernet-framed link layer bytes (see struct docs).
+    pub data: Vec<u8>,
+}
+
 /// Power-state action recorded by [`FakeDevice`] for test inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PowerCall {
@@ -224,6 +273,13 @@ pub trait Device: Send + Sync {
     /// one `Result<LogEntry>` per parsed line. The session ends when the
     /// receiver is dropped or the device disconnects.
     async fn stream_logs(&self) -> Result<tokio::sync::mpsc::Receiver<Result<LogEntry>>>;
+
+    /// Open a streaming pcapd session. The returned [`PacketStream`] carries
+    /// both the receiver and a shared drop counter — producers that can't
+    /// keep up with the consumer increment `dropped` rather than blocking.
+    /// The session ends when the receiver is dropped or the device
+    /// disconnects.
+    async fn capture_packets(&self) -> Result<PacketStream>;
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +430,8 @@ pub struct FakeDevice {
     pub fail_power: bool,
     /// Seeded syslog entries — `stream_logs` replays them one-per-tick.
     pub seeded_logs: Vec<Result<LogEntry, String>>,
+    /// Seeded packets — `capture_packets` replays them one-per-tick.
+    pub seeded_packets: Vec<Result<Packet, String>>,
 }
 
 impl FakeDevice {
@@ -513,6 +571,7 @@ impl Default for FakeDevice {
             power_calls: std::sync::Mutex::new(Vec::new()),
             fail_power: false,
             seeded_logs: Vec::new(),
+            seeded_packets: Vec::new(),
         }
     }
 }
@@ -606,6 +665,21 @@ impl Device for FakeDevice {
         });
         Ok(rx)
     }
+
+    async fn capture_packets(&self) -> Result<PacketStream> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Packet>>(64);
+        let packets = self.seeded_packets.clone();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn(async move {
+            for pkt in packets {
+                let result = pkt.map_err(|e| anyhow!(e));
+                if tx.send(result).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(PacketStream { rx, dropped })
+    }
 }
 
 impl FakeDevice {
@@ -624,6 +698,7 @@ mod real {
         pairing_file::PairingFile,
         provider::IdeviceProvider,
         services::diagnostics_relay::DiagnosticsRelayClient,
+        services::pcapd::PcapdClient,
         services::syslog_relay::SyslogRelayClient,
         usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection},
         IdeviceService,
@@ -1020,6 +1095,57 @@ mod real {
                 }
             });
             Ok(rx)
+        }
+
+        async fn capture_packets(&self) -> Result<PacketStream> {
+            use std::sync::atomic::Ordering;
+            use tokio::sync::mpsc::error::TrySendError;
+
+            // Lockdown-classic connect (USB / usbmuxd). The crate's RsdService
+            // path is only relevant when reaching pcapd through the RemoteXPC
+            // tunnel — out of scope for the MVP (see CLAUDE.md).
+            let mut client = PcapdClient::connect(&*self.provider).await.map_err(|e| {
+                anyhow!("pcapd unavailable: {e:?} — ensure the device is unlocked and trusted")
+            })?;
+            // Bounded channel: the producer task uses `try_send` instead of
+            // `send().await`. If the consumer is slow, we increment `dropped`
+            // — blocking here would back-pressure pcapd inside the device and
+            // cause silent upstream loss we can't surface to the user.
+            // Counted drops at this seam are observable; silent ones are not.
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Packet>>(1024);
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let dropped_for_task = dropped.clone();
+            tokio::spawn(async move {
+                loop {
+                    match client.next_packet().await {
+                        Ok(p) => {
+                            let pkt = Packet {
+                                pid: p.pid,
+                                comm: p.comm,
+                                epid: p.epid,
+                                ecomm: p.ecomm,
+                                interface: p.interface_name,
+                                seconds: p.seconds,
+                                microseconds: p.microseconds,
+                                io: p.io,
+                                data: p.data,
+                            };
+                            match tx.try_send(Ok(pkt)) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_for_task.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow!("pcapd stream ended: {e:?}"))).await;
+                            break;
+                        }
+                    }
+                }
+            });
+            Ok(PacketStream { rx, dropped })
         }
     }
 
