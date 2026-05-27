@@ -1,5 +1,6 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
-.DS_Store.superpowers/
+.DS_Store
+.superpowers/
 out.pcapng
