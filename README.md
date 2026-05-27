@@ -1,6 +1,6 @@
 # quokka 🐹
 
-> Inspect and tidy an iPhone connected to your Mac over USB, from the terminal.
+> Inspect and clean an iPhone connected to your Mac over USB, from the terminal.
 
 [![CI](https://github.com/dutradotdev/quokka/actions/workflows/ci.yml/badge.svg)](https://github.com/dutradotdev/quokka/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
