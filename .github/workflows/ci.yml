@@ -19,6 +19,11 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Least-privilege default for every job in this workflow. Individual jobs
+# can elevate if they need to (none do today).
+permissions:
+  contents: read
+
 jobs:
   test:
     # quokka is a macOS tool (it talks to usbmuxd); CI runs on macOS to match.

@@ -159,6 +159,15 @@ enum Command {
     },
     /// List every iPhone reachable through usbmuxd (works with no --udid).
     Devices,
+    /// Check GitHub for a newer release and reinstall this binary.
+    Update {
+        /// Only report whether a newer version exists. Don't install.
+        #[arg(long)]
+        check: bool,
+        /// Skip the interactive confirmation. Required for non-TTY use.
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Stream network packets from `com.apple.pcapd` with per-packet
     /// process info (PID + comm). Press Ctrl-C to stop.
     Capture {
@@ -217,17 +226,20 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // `qk devices` is the one subcommand that does not select a device,
-    // so handle it before reaching for the connection.
+    // `qk devices` and `qk update` are the subcommands that do not select
+    // a device, so handle them before reaching for the connection.
     if matches!(cli.command, Some(Command::Devices)) {
         return commands::devices::run(cli.json).await;
+    }
+    if let Some(Command::Update { check, yes }) = cli.command {
+        return commands::update::run(check, yes).await;
     }
 
     let device = device::connect(cli.udid.as_deref()).await?;
 
     match cli.command {
         None => commands::menu::run(&*device).await,
-        Some(Command::Devices) => {
+        Some(Command::Devices) | Some(Command::Update { .. }) => {
             // Already handled above; keeping the arm satisfies the
             // exhaustiveness check without an unreachable!().
             Ok(())

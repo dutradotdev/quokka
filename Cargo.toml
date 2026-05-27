@@ -57,7 +57,7 @@ idevice = { version = "=0.1.61", default-features = false, features = [
     "rsd",
 ] }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "1"
@@ -82,7 +82,7 @@ indicatif = "0.17"
 dialoguer = { version = "0.11", default-features = false }
 # Live-updating multi-select TUI for `qk apps` — items render with static
 # sizes immediately, then refresh as Phase 2 enrichment streams in.
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 # Pure-Rust packet parser (Ethernet / IPv4 / IPv6 / TCP / UDP / ICMP). No C deps.
 etherparse = "0.20"

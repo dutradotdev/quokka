@@ -12,12 +12,13 @@ use crossterm::{cursor, execute, terminal};
 use dialoguer::{theme::ColorfulTheme, Select};
 use owo_colors::OwoColorize;
 
-use crate::commands::{analyze, apps, capture, dashboard, info, logs, media, power};
+use crate::commands::{analyze, apps, capture, dashboard, info, logs, media, power, update};
 use crate::device::Device;
 use crate::ui::{now_unix, spinner, terminal_width};
 
 const TAGLINE: &str = "Inspect and tidy your iPhone from the Mac";
 const AUTHOR: &str = "by Lucas Dutra";
+const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Copy)]
 enum Choice {
@@ -30,6 +31,7 @@ enum Choice {
     Refresh,
     Reboot,
     Shutdown,
+    Update,
     Quit,
 }
 
@@ -50,9 +52,10 @@ pub async fn run(device: &dyn Device) -> Result<()> {
         writeln!(out)?;
         writeln!(
             out,
-            "  {tagline} · {author}",
+            "  {tagline} · {author} · {version}",
             tagline = TAGLINE,
             author = AUTHOR.dimmed(),
+            version = VERSION.dimmed(),
         )?;
         writeln!(out)?;
         out.flush()?;
@@ -70,6 +73,7 @@ pub async fn run(device: &dyn Device) -> Result<()> {
             ("Refresh", "Re-read device info", Choice::Refresh),
             ("Reboot", "Restart the device", Choice::Reboot),
             ("Shutdown", "Power off the device", Choice::Shutdown),
+            ("Update", "Check for a new quokka release", Choice::Update),
             ("Quit", "", Choice::Quit),
         ];
         let items: Vec<String> = menu
@@ -112,6 +116,7 @@ pub async fn run(device: &dyn Device) -> Result<()> {
             Choice::Info => info::run(device, false, false).await?,
             Choice::Reboot => power::run(device, power::Action::Reboot, false).await?,
             Choice::Shutdown => power::run(device, power::Action::Shutdown, false).await?,
+            Choice::Update => update::run(false, false).await?,
         }
 
         wait_for_continue()?;

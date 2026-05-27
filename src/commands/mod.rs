@@ -9,3 +9,4 @@ pub mod media;
 pub mod menu;
 pub mod power;
 pub mod status;
+pub mod update;
