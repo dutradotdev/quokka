@@ -1,6 +1,7 @@
 pub mod analyze;
 pub mod apps;
 pub mod capture;
+pub mod card;
 pub mod dashboard;
 pub mod devices;
 pub mod info;

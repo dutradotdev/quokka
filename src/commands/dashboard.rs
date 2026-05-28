@@ -33,7 +33,7 @@ const BATTERY_HEALTH_CRIT: u8 = 70;
 /// padded out to [`ART_WIDTH`] before colouring so the status column always
 /// lands in the same place regardless of terminal theme or the applied colour.
 /// Raw strings so the backslashes and backticks need no escaping.
-const QUOKKA_ART: &[&str] = &[
+pub const QUOKKA_ART: &[&str] = &[
     r"                   _    _",
     r"  __ _ _   _  ___ | | _| | ____ _",
     r" / _` | | | |/ _ \| |/ / |/ / _` |",
@@ -420,6 +420,11 @@ mod tests {
             find_my: Some(true),
             last_backup_unix: Some(NOW_UNIX - 3 * 86_400),
             paired_since_unix: Some(NOW_UNIX - 800 * 86_400),
+            chip_name: None,
+            storage_breakdown: None,
+            oldest_app: None,
+            jailbreak_detected: false,
+            is_beta_build: false,
         }
     }
 

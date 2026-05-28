@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `qk card` — render a 1080×1080 PNG snapshot of the connected iPhone with
+  storage breakdown by category (Photos / Apps / Other), chip name, battery
+  health, install age, last-backup age, and up to 3 earned badges from a
+  15-entry catalog. Saves to `~/Desktop` and opens in Preview by default;
+  prints a pre-filled Twitter intent URL for sharing. `--redact` masks the
+  build number, oldest-app name, exact dates, and bucketed backup age.
+- New `DeviceStatus` fields populated by `RealDevice::status()`: `chip_name`
+  (from lockdown `HardwarePlatform`), `storage_breakdown` (from
+  `com.apple.disk_usage`), `oldest_app` (from `installation_proxy`
+  `LSInstallDate`), `jailbreak_detected` (bundle-ID match against a curated
+  list), and `is_beta_build` (regex on the iOS build string).
+
 ### Fixed
 
 - Crash in `qk logs` search highlighting when the message contained

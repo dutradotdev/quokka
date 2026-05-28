@@ -79,4 +79,12 @@ streams live size updates as Phase 2 enrichment completes. `status`, read-only
 `analyze`, and the bare-`quokka` launcher print plain output blocks (the
 launcher's menu is a `dialoguer` select, not ratatui).
 
+`qk card` renders an SVG → PNG (1080×1080) via `resvg`/`usvg`/`tiny-skia` with
+JetBrains Mono embedded via `include_bytes!`. The renderer is a pure function
+of a pre-projected `CardData` (no `SystemTime::now` in the layout layer) so
+SVG output is byte-identical given identical device state plus a fixed `now`.
+Reads from lockdown domains already in use by `status` / `info` / `apps`
+(`com.apple.disk_usage` adds `CameraUsage` / `MobileApplicationUsage` /
+`OtherUsage`; `installation_proxy.browse` adds `LSInstallDate`).
+
 If a request looks like one of the above, push back and reference this section.

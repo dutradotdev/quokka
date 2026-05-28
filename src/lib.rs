@@ -168,6 +168,22 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Render a 1080x1080 PNG snapshot of the iPhone — neofetch-style flex
+    /// card with the project repo URL in the footer. Saves to ~/Desktop by
+    /// default and opens in Preview unless --no-open.
+    Card {
+        /// Override the output path. Defaults to
+        /// `~/Desktop/qk-card-<YYYYMMDD-HHMM>.png`.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Skip opening the PNG in Preview after generation.
+        #[arg(long)]
+        no_open: bool,
+        /// Mask anything potentially personal (build number, exact dates,
+        /// oldest-app name).
+        #[arg(short, long)]
+        redact: bool,
+    },
     /// Stream network packets from `com.apple.pcapd` with per-packet
     /// process info (PID + comm). Press Ctrl-C to stop.
     Capture {
@@ -259,6 +275,31 @@ pub async fn run() -> Result<()> {
             commands::analyze::run(&*device, top, delete).await
         }
         Some(Command::Info { redact }) => commands::info::run(&*device, redact, cli.json).await,
+        Some(Command::Card {
+            output,
+            no_open,
+            redact,
+        }) => {
+            commands::card::run(
+                &*device,
+                crate::ui::now_unix(),
+                commands::card::CardArgs {
+                    output,
+                    no_open,
+                    redact,
+                },
+            )
+            .await?;
+            // `qk card` is the most-shared entry point — users often arrive
+            // from a tweet without realising there's a whole launcher behind
+            // the rest of the CLI. On a TTY, drop them into the interactive
+            // menu after the card prints so they discover the other commands;
+            // pipes / CI keep the one-shot behaviour.
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                commands::menu::run(&*device).await?;
+            }
+            Ok(())
+        }
         Some(Command::Reboot { yes }) => {
             commands::power::run(&*device, commands::power::Action::Reboot, yes).await
         }

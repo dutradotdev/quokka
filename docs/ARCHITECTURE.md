@@ -95,9 +95,19 @@ Each file in `src/commands/` is one command and exposes an
   unit-testable. Shared by `status` and the launcher.
 - **`menu.rs`** — the interactive launcher shown when `quokka` is run with no
   subcommand on a TTY.
+- **`card/`** — `qk card` renders a 1080×1080 PNG snapshot of the device for
+  social sharing. The pipeline has four pure layers and one IO layer:
+  `data.rs` projects `DeviceStatus + now → CardData` (all time-derived
+  values are pre-formatted strings, so the renderer is deterministic);
+  `badges.rs` evaluates 15 eligibility checks and ranks the top 3;
+  `render.rs` is a pure `fn render_svg(&CardData) -> String`; `png.rs`
+  rasterises via `resvg` with JetBrains Mono embedded via `include_bytes!`
+  and registered in `usvg::Options::fontdb`; `share.rs` formats the Twitter
+  intent URL. `mod.rs` is the only layer that touches the filesystem and
+  spawns `open` for Preview.
 
-`apps` and `analyze` are the only commands with an interactive TUI; everything
-else prints a plain block of output.
+`apps` and `analyze` are the only commands with an interactive TUI; `card`
+writes a PNG and exits; everything else prints a plain block of output.
 
 ## UX principles
 

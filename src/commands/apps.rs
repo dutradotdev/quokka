@@ -862,18 +862,21 @@ mod tests {
                 name: "Small".into(),
                 size_bytes: 50_000_000,
                 is_system: false,
+                install_date_unix: None,
             },
             App {
                 bundle_id: "com.apple.System".into(),
                 name: "System".into(),
                 size_bytes: 9_999_999_999,
                 is_system: true,
+                install_date_unix: None,
             },
             App {
                 bundle_id: "com.user.big".into(),
                 name: "Big".into(),
                 size_bytes: 500_000_000,
                 is_system: false,
+                install_date_unix: None,
             },
         ]
     }
@@ -897,18 +900,21 @@ mod tests {
                 name: "A".into(),
                 size_bytes: 100,
                 is_system: false,
+                install_date_unix: None,
             },
             App {
                 bundle_id: "com.user.b".into(),
                 name: "B".into(),
                 size_bytes: 100,
                 is_system: false,
+                install_date_unix: None,
             },
             App {
                 bundle_id: "com.user.c".into(),
                 name: "C".into(),
                 size_bytes: 100,
                 is_system: false,
+                install_date_unix: None,
             },
         ];
         let sorted = user_apps_by_size(apps);
@@ -927,6 +933,7 @@ mod tests {
             name: "Foo".into(),
             size_bytes: 1,
             is_system: true,
+            install_date_unix: None,
         }];
         assert!(user_apps_by_size(only_system).is_empty());
     }
@@ -1001,6 +1008,7 @@ mod tests {
             name: "X".into(),
             size_bytes: 1,
             is_system: false,
+            install_date_unix: None,
         }
     }
 

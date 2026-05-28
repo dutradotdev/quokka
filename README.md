@@ -15,7 +15,7 @@ elevated privileges.
 It is built on the Rust [`idevice`](https://github.com/jkcoxson/idevice) crate
 and works on iOS 17 and newer.
 
-## ⚡ Quick start
+## Quick start
 
 ```sh
 brew install dutradotdev/tap/quokka-cli
@@ -28,28 +28,6 @@ below for `curl` and `cargo` alternatives.
 ## Demo
 
 ![quokka demo](docs/demo.gif)
-
-## Dashboard preview
-
-Run `quokka` with no arguments and you get a live device dashboard plus an
-interactive menu:
-
-```text
-                   _    _             Lucas's iPhone (iPhone 14 Pro Max)
-  __ _ _   _  ___ | | _| | ____ _      iOS 18.2 (build 22C152) · pt-BR · Sao Paulo
- / _` | | | |/ _ \| |/ / |/ / _` |
-| (_| | |_| | (_) |   <|   < (_| |     Storage   ████░░░░░░   42%  107.5 GB / 256.0 GB
- \__, |\__,_|\___/|_|\_\_|\_\__,_|               ├─ System   12.4 GB
-    |_|                                          ├─ Data     95.1 GB
-                                                 └─ Free    148.5 GB
-
-                                       Battery   level   87% ⚡ 20W USB-C
-                                                 health  91%
-                                                 cycles  142
-                                                 temp    27.4 °C
-
-  47 apps · last backup 2023 · paired since 2021
-```
 
 ## Commands
 
@@ -65,6 +43,7 @@ interactive menu:
 | `quokka reboot`   | Soft reboot via `diagnostics_relay`. Confirms by default; `--yes` skips.                                                        |
 | `quokka shutdown` | Power off via `diagnostics_relay`. Confirms by default; `--yes` skips.                                                          |
 | `quokka devices`  | List every iPhone reachable through `usbmuxd`. Does not select one.                                                             |
+| `quokka card`     | Render a 1080×1080 PNG snapshot of the iPhone — neofetch-style flex card. Saves to `~/Desktop` and opens in Preview by default. |
 
 ## Examples
 
@@ -90,16 +69,11 @@ qk logs --no-tui --process SpringBoard --save /tmp/sb.log  # filter + tee
 
 qk reboot                              # asks to confirm
 qk shutdown --yes                      # non-interactive
+
+qk card                                # render a 1080x1080 PNG to ~/Desktop and open in Preview
+qk card --output ~/Pictures/me.png     # custom output path
+qk card --no-open --redact             # don't open Preview, mask anything personal
 ```
-
-`analyze` is read-only unless you pass `--delete`. `--delete` only works from
-an interactive terminal; in a pipe or CI it refuses to run rather than guess
-what to delete. The picker has a min-size filter, substring search, and an
-auto-mark menu that flags Live Photo motion videos, edited-photo originals,
-old screenshots, and exact duplicates.
-
-`reboot` and `shutdown` are destructive. In a non-TTY shell they require
-`--yes` rather than guess the answer, same as `apps --uninstall`.
 
 ## Multiple iPhones connected
 
@@ -121,7 +95,7 @@ also reads from `QK_UDID` in the environment, so you can set it once per shell.
 ## Requirements
 
 - A Mac with the Xcode command line tools (`xcode-select --install`).
-- An iPhone connected via cable. Wi-Fi pairing is out of scope.
+- An iPhone connected via cable.
 - The device must be trusted. The first time you plug it in, unlock the iPhone
   and tap _Trust this computer_.
 - iOS 17 or newer.
@@ -164,20 +138,6 @@ Every install method drops two binaries on your `PATH`: `quokka` and the
 shorter `qk`. They share the same code, so `qk status` and `quokka status` do
 the same thing.
 
-## What it does not do (and why)
-
-iOS sandboxes third-party tooling tightly. Some things people ask about cannot
-be done from a desktop companion without jailbreaking:
-
-- Per-app cache cleanup across the board. Caches live inside each app's
-  sandbox, only reachable via `house_arrest` and only for apps that opt into
-  file sharing. There is no "clear cache" verb that works everywhere.
-- Crash log retrieval, full backups, Wi-Fi pairing. Out of scope for the MVP.
-  Possibly a v2.
-
-For any of these today, [libimobiledevice](https://libimobiledevice.org/) or
-Apple Configurator are the alternatives.
-
 ## Development
 
 ```sh
@@ -195,6 +155,19 @@ cargo fmt
 
 Every push and pull request runs through [CI](.github/workflows/ci.yml):
 formatting, clippy, the full test suite, `cargo audit`, and `cargo deny`.
+
+## Acknowledgments
+
+`qk card` ships with [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
+embedded in the binary so the rendered PNG looks the same on every machine.
+JetBrains Mono is distributed under the
+[SIL Open Font License 1.1](assets/fonts/OFL.txt); the bundled font files are
+unmodified copies.
+
+Badge artwork uses [Twemoji](https://github.com/jdecked/twemoji) by Twitter
+and contributors, licensed under
+[CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The bundled SVGs
+are unmodified copies.
 
 ## License
 

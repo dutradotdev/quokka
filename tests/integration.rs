@@ -38,6 +38,11 @@ fn healthy_status() -> DeviceStatus {
         find_my: Some(true),
         last_backup_unix: Some(1_700_000_000),
         paired_since_unix: Some(1_640_000_000),
+        chip_name: Some("A16 Bionic".into()),
+        storage_breakdown: None,
+        oldest_app: None,
+        jailbreak_detected: false,
+        is_beta_build: false,
     }
 }
 
@@ -134,18 +139,21 @@ fn sample_apps() -> Vec<App> {
             name: "Big User App".into(),
             size_bytes: 800_000_000,
             is_system: false,
+            install_date_unix: None,
         },
         App {
             bundle_id: "com.user.small".into(),
             name: "Small".into(),
             size_bytes: 50_000_000,
             is_system: false,
+            install_date_unix: None,
         },
         App {
             bundle_id: "com.apple.MobileSMS".into(),
             name: "Messages".into(),
             size_bytes: 120_000_000,
             is_system: true,
+            install_date_unix: None,
         },
     ]
 }
@@ -775,4 +783,94 @@ async fn capture_run_with_app_filter_does_not_crash_on_misses() {
     )
     .await;
     assert!(result.is_ok());
+}
+
+// ============================================================================
+// `qk card` — render against FakeDevice
+// ============================================================================
+
+#[tokio::test]
+async fn card_run_writes_a_1080x1080_png_to_the_given_path() {
+    use quokka_cli::commands::card;
+
+    let fake = quokka_cli::device::FakeDevice::with_status(healthy_status());
+    let tmp = tempfile::NamedTempFile::new().expect("temp file");
+    let png_path = tmp.path().with_extension("png");
+
+    card::run(
+        &fake,
+        NOW_UNIX,
+        card::CardArgs {
+            output: Some(png_path.clone()),
+            no_open: true,
+            redact: false,
+        },
+    )
+    .await
+    .expect("card::run should succeed against a healthy fake");
+
+    let bytes = std::fs::read(&png_path).expect("PNG written");
+    assert!(
+        bytes.len() > 50_000,
+        "PNG suspiciously small ({} bytes) — likely rendered as empty",
+        bytes.len()
+    );
+    let (w, h) = card::png::read_png_dimensions(&bytes).expect("valid PNG IHDR");
+    assert_eq!((w, h), (1080, 1080));
+
+    let _ = std::fs::remove_file(&png_path);
+}
+
+#[tokio::test]
+async fn card_redact_suppresses_build_number_and_exact_first_seen_month() {
+    use quokka_cli::commands::card::{data, render};
+
+    let status = healthy_status();
+    let normal = render::render_svg(&data::project(&status, NOW_UNIX, false));
+    let redacted = render::render_svg(&data::project(&status, NOW_UNIX, true));
+
+    // Default renders include the full build + month name.
+    assert!(
+        normal.contains("(22C152)"),
+        "normal mode missing build number"
+    );
+    // Redacted strips both.
+    assert!(
+        !redacted.contains("22C152"),
+        "--redact must hide the iOS build number"
+    );
+    assert!(
+        !redacted.contains("Mar 2022"),
+        "--redact must hide the precise first-seen month"
+    );
+    // Year still present in some form (the paired_since year).
+    assert!(redacted.contains("2021") || redacted.contains("2020") || redacted.contains("2022"));
+}
+
+#[tokio::test]
+async fn card_jailbreak_flag_surfaces_on_the_apps_row() {
+    use quokka_cli::commands::card::{data, render};
+
+    let mut status = healthy_status();
+    status.jailbreak_detected = true;
+    let svg = render::render_svg(&data::project(&status, NOW_UNIX, false));
+    assert!(
+        svg.contains("jailbroken"),
+        "jailbreak flag should surface as `jailbroken`"
+    );
+    assert!(!svg.contains("pristine"));
+}
+
+#[tokio::test]
+async fn card_renders_with_storage_breakdown_fallback_when_ios_omits_categories() {
+    use quokka_cli::commands::card::{data, render};
+
+    let mut status = healthy_status();
+    status.storage_breakdown = None;
+    let svg = render::render_svg(&data::project(&status, NOW_UNIX, false));
+    // Fallback path still emits the STORAGE section but without the four
+    // category rows.
+    assert!(svg.contains("STORAGE"));
+    assert!(!svg.contains("photos"));
+    assert!(!svg.contains("apps      "));
 }

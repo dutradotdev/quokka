@@ -10,7 +10,11 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use thiserror::Error;
 
+pub mod build_version;
+pub mod chip_names;
+pub mod jailbreak;
 pub mod model_names;
+pub mod model_release_years;
 
 /// Typed device-layer errors. Surfacing these as a real `enum` (instead of
 /// stringly-typed `anyhow` everywhere) lets callers branch on the failure
@@ -222,11 +226,18 @@ pub trait Device: Send + Sync {
     /// across iOS versions — missing fields render as `—` rather than fail.
     async fn status(&self) -> Result<DeviceStatus>;
 
-    /// All apps known to `installation_proxy`, system and user, with
-    /// **bundle sizes only** (`StaticDiskUsage`). Fast — one round-trip.
-    /// To include cache/downloads, follow up with
+    /// User-installed apps known to `installation_proxy`, with **bundle
+    /// sizes only** (`StaticDiskUsage`). Fast — one round-trip. To
+    /// include cache/downloads, follow up with
     /// [`with_dynamic_sizes`](Self::with_dynamic_sizes).
     async fn apps(&self) -> Result<Vec<App>>;
+
+    /// User + system apps. Same shape as [`Self::apps`] but without the
+    /// server-side `"User"` filter — pre-installed Apple apps (Messages,
+    /// Photos, App Store, …) are included. Used by `qk card` for the
+    /// TOP APPS section which is meant to surface the actual storage
+    /// heavyweights regardless of who installed them.
+    async fn all_apps(&self) -> Result<Vec<App>>;
 
     /// Enrich an already-fetched list with `DynamicDiskUsage` so each
     /// `App::size_bytes` matches what iOS Settings → iPhone Storage shows.
@@ -288,6 +299,39 @@ pub struct App {
     pub name: String,
     pub size_bytes: u64,
     pub is_system: bool,
+    /// Unix seconds of the **current install record's** creation. Comes from
+    /// `LSInstallDate` in `installation_proxy.browse`. Resets when the app is
+    /// reinstalled or restored from iCloud — so this is "how long the current
+    /// install has lived", not "first ever installed". `None` when iOS did
+    /// not return the key.
+    pub install_date_unix: Option<i64>,
+}
+
+/// Storage usage broken down by category. Read from the lockdown
+/// `com.apple.disk_usage` domain (same domain as the basic [`Storage`]
+/// totals). All three categories together do not always sum to "used" — iOS
+/// keeps a small bucket of opaque system overhead that the breakdown omits.
+#[derive(Debug, Clone, Copy)]
+pub struct StorageBreakdown {
+    /// `CameraUsage` — photos and videos in the user's library.
+    pub camera_bytes: u64,
+    /// `MobileApplicationUsage` — installed apps and their containers.
+    pub apps_bytes: u64,
+    /// `OtherUsage` — everything else (mail, podcasts, downloads, system
+    /// caches). Derived from `used - camera - apps` if iOS doesn't expose it
+    /// directly.
+    pub other_bytes: u64,
+}
+
+/// The user-installed app whose current install record is oldest. Surfaced
+/// on `qk card` as a descriptive line ("Spotify is your oldest"), never as a
+/// historical claim — `LSInstallDate` resets on reinstall and on iCloud
+/// restore, so it does not ground a "first ever" badge.
+#[derive(Debug, Clone)]
+pub struct OldestApp {
+    pub bundle_id: String,
+    pub display_name: String,
+    pub install_date_unix: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -332,6 +376,25 @@ pub struct DeviceStatus {
     /// time this Mac was trusted. Read from the on-disk plist, not the
     /// device itself.
     pub paired_since_unix: Option<i64>,
+    /// SoC marketing name resolved from lockdown `HardwarePlatform` via
+    /// [`chip_names::chip_name`] (e.g. `"A16 Bionic"`). `None` for unknown
+    /// platforms — the renderer omits the chip line rather than print the
+    /// raw codename.
+    pub chip_name: Option<String>,
+    /// Per-category storage breakdown from `com.apple.disk_usage` (Camera /
+    /// Apps / Other). `None` when any of the required keys was missing, in
+    /// which case the card falls back to a single used/free bar.
+    pub storage_breakdown: Option<StorageBreakdown>,
+    /// The user-installed app with the oldest `LSInstallDate`. See
+    /// [`OldestApp`] for the caveat — this is a descriptive signal, not a
+    /// historical claim.
+    pub oldest_app: Option<OldestApp>,
+    /// `true` when at least one installed bundle id matches a known
+    /// jailbreak store / launcher list. Surfaced as a flag, not a flex.
+    pub jailbreak_detected: bool,
+    /// `true` when `ios_build` matches Apple's developer / public beta
+    /// pattern (a final-letter suffix on a 5-digit middle number).
+    pub is_beta_build: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -495,6 +558,19 @@ impl Default for FakeDevice {
                 find_my: Some(true),
                 last_backup_unix: Some(1_700_000_000),
                 paired_since_unix: Some(1_640_000_000),
+                chip_name: Some("A16 Bionic".into()),
+                storage_breakdown: Some(StorageBreakdown {
+                    camera_bytes: 84_000_000_000,
+                    apps_bytes: 18_700_000_000,
+                    other_bytes: 4_800_000_000,
+                }),
+                oldest_app: Some(OldestApp {
+                    bundle_id: "com.spotify.client".into(),
+                    display_name: "Spotify".into(),
+                    install_date_unix: 1_648_000_000,
+                }),
+                jailbreak_detected: false,
+                is_beta_build: false,
             }),
             apps: Ok(vec![
                 App {
@@ -502,18 +578,21 @@ impl Default for FakeDevice {
                     name: "Heavy User App".into(),
                     size_bytes: 800_000_000,
                     is_system: false,
+                    install_date_unix: None,
                 },
                 App {
                     bundle_id: "com.example.medium".into(),
                     name: "Medium User App".into(),
                     size_bytes: 250_000_000,
                     is_system: false,
+                    install_date_unix: None,
                 },
                 App {
                     bundle_id: "com.apple.MobileSMS".into(),
                     name: "Messages".into(),
                     size_bytes: 120_000_000,
                     is_system: true,
+                    install_date_unix: None,
                 },
             ]),
             uninstall_result: Ok(()),
@@ -583,6 +662,14 @@ impl Device for FakeDevice {
     }
 
     async fn apps(&self) -> Result<Vec<App>> {
+        self.apps.clone().map_err(|e| anyhow!(e))
+    }
+
+    async fn all_apps(&self) -> Result<Vec<App>> {
+        // The fake doesn't differentiate user/system at fetch time —
+        // the `is_system` flag on each `App` already captures it. Hand
+        // back everything so the TOP APPS code path sees the same shape
+        // it would against a real device.
         self.apps.clone().map_err(|e| anyhow!(e))
     }
 
@@ -928,12 +1015,12 @@ mod real {
         async fn status(&self) -> Result<DeviceStatus> {
             // Three independent service connections — overlap them so the
             // welcome screen's wall-clock time is bounded by the slowest one.
-            // `count_user_apps` is best-effort: if installation_proxy is busy
+            // `survey_user_apps` is best-effort: if installation_proxy is busy
             // the dashboard still renders without an app count.
-            let (lockdown, diag, app_count) = tokio::join!(
+            let (lockdown, diag, app_survey) = tokio::join!(
                 self.read_lockdown_info(),
                 read_battery_diag(&*self.provider),
-                count_user_apps(&*self.provider),
+                survey_user_apps(&*self.provider),
             );
             let info = lockdown?;
             let model_friendly = info
@@ -941,12 +1028,25 @@ mod real {
                 .as_deref()
                 .and_then(model_names::friendly_name)
                 .map(str::to_string);
+            let chip_name = info
+                .hardware_platform
+                .as_deref()
+                .and_then(super::chip_names::chip_name)
+                .map(str::to_string);
+            let is_beta_build = info
+                .ios_build
+                .as_deref()
+                .is_some_and(super::build_version::is_beta);
             let battery = Battery {
                 level_percent: info.battery_level,
                 is_charging: info.is_charging,
                 adapter_watts: info.adapter_watts,
                 adapter_description: info.adapter_description,
                 ..diag
+            };
+            let (app_count, oldest_app, jailbreak_detected) = match app_survey {
+                Some(s) => (Some(s.count), s.oldest, s.jailbreak),
+                None => (None, None, false),
             };
             Ok(DeviceStatus {
                 name: info.name,
@@ -964,6 +1064,11 @@ mod real {
                 find_my: info.find_my,
                 last_backup_unix: info.last_backup_unix,
                 paired_since_unix: read_paired_since_unix(&self.udid),
+                chip_name,
+                storage_breakdown: info.storage_breakdown,
+                oldest_app,
+                jailbreak_detected,
+                is_beta_build,
             })
         }
 
@@ -973,6 +1078,14 @@ mod real {
             // of preinstalled Apple apps. Matches what the upstream `idevice`
             // tool does (`get_apps(Some("User"), None)`).
             lookup_apps(&*self.provider, None, false, "User").await
+        }
+
+        async fn all_apps(&self) -> Result<Vec<App>> {
+            // `"Any"` includes both User and System bundles. Caller
+            // pays the larger payload (a few hundred extra apps on a
+            // typical iPhone) in exchange for an honest "what's actually
+            // taking up space" view in `qk card`.
+            lookup_apps(&*self.provider, None, false, "Any").await
         }
 
         async fn with_dynamic_sizes(
@@ -1340,6 +1453,9 @@ mod real {
             "CFBundleName",
             "ApplicationType",
             "StaticDiskUsage",
+            // Needed for `qk card`'s "oldest app" line. Cheap to request even
+            // when the caller isn't `card` — costs ~8 bytes per app.
+            "LSInstallDate",
         ];
         if include_dynamic {
             attrs.push("DynamicDiskUsage");
@@ -1496,11 +1612,24 @@ mod real {
             .get("DynamicDiskUsage")
             .and_then(plist_as_u64)
             .unwrap_or(0);
+        // `LSInstallDate` is the current install record's creation date —
+        // resets on reinstall/restore (see `App::install_date_unix` docs).
+        // Used by `qk card` for the "oldest app" descriptive line; not a
+        // historical "first install ever" signal.
+        let install_date_unix = dict
+            .get("LSInstallDate")
+            .and_then(plist::Value::as_date)
+            .and_then(|date| {
+                let st: std::time::SystemTime = date.into();
+                st.duration_since(std::time::UNIX_EPOCH).ok()
+            })
+            .map(|d| d.as_secs() as i64);
         Some(App {
             bundle_id,
             name,
             size_bytes: static_size.saturating_add(dynamic_size),
             is_system,
+            install_date_unix,
         })
     }
 
@@ -1510,7 +1639,9 @@ mod real {
         pub ios_version: Option<String>,
         pub ios_build: Option<String>,
         pub enclosure_color: Option<String>,
+        pub hardware_platform: Option<String>,
         pub storage: Option<Storage>,
+        pub storage_breakdown: Option<StorageBreakdown>,
         pub battery_level: Option<u8>,
         pub is_charging: Option<bool>,
         pub adapter_watts: Option<u32>,
@@ -1543,6 +1674,8 @@ mod real {
                 None => read_string(&mut lock, "DeviceColor", None).await,
             };
             let storage = read_storage(&mut lock).await;
+            let storage_breakdown = read_storage_breakdown(&mut lock, storage.as_ref()).await;
+            let hardware_platform = read_string(&mut lock, "HardwarePlatform", None).await;
             let battery_domain = Some("com.apple.mobile.battery");
             // MobileGestalt was deprecated for diagnostics_relay in iOS 17.4;
             // the lockdown battery domain is the supported path now.
@@ -1579,7 +1712,9 @@ mod real {
                 ios_version,
                 ios_build,
                 enclosure_color,
+                hardware_platform,
                 storage,
+                storage_breakdown,
                 battery_level,
                 is_charging,
                 adapter_watts,
@@ -1591,6 +1726,33 @@ mod real {
                 last_backup_unix,
             })
         }
+    }
+
+    /// Reads `CameraUsage`, `MobileApplicationUsage`, and `OtherUsage` from
+    /// the `com.apple.disk_usage` domain to populate the per-category
+    /// storage breakdown shown on `qk card`. Returns `None` if any required
+    /// key is absent — the card then falls back to a single used/free bar.
+    /// When `OtherUsage` is missing but the camera + apps + total/free data
+    /// is intact, it's derived as `used - camera - apps`.
+    async fn read_storage_breakdown(
+        lock: &mut LockdownClient,
+        storage: Option<&Storage>,
+    ) -> Option<StorageBreakdown> {
+        let domain = Some("com.apple.disk_usage");
+        let camera_bytes = read_u64(lock, "CameraUsage", domain).await?;
+        let apps_bytes = read_u64(lock, "MobileApplicationUsage", domain).await?;
+        let other_bytes = match read_u64(lock, "OtherUsage", domain).await {
+            Some(v) => v,
+            None => {
+                let used = storage?.used_bytes();
+                used.saturating_sub(camera_bytes.saturating_add(apps_bytes))
+            }
+        };
+        Some(StorageBreakdown {
+            camera_bytes,
+            apps_bytes,
+            other_bytes,
+        })
     }
 
     /// Read `AdapterDetails` from the lockdown battery domain. The key is
@@ -1618,11 +1780,41 @@ mod real {
         (watts, description)
     }
 
-    async fn count_user_apps(provider: &dyn IdeviceProvider) -> Option<usize> {
-        lookup_apps(provider, None, false, "User")
-            .await
-            .ok()
-            .map(|apps| apps.len())
+    /// What `RealDevice::status()` needs from a single user-app browse: the
+    /// count plus the two card-related derived signals (oldest install,
+    /// jailbreak hint). Best-effort: `None` when installation_proxy can't
+    /// answer at all.
+    pub(super) struct AppSurvey {
+        pub count: usize,
+        pub oldest: Option<OldestApp>,
+        pub jailbreak: bool,
+    }
+
+    /// Single user-app browse, harvesting the three signals `status()`
+    /// needs. The `LSInstallDate` attribute is requested explicitly — if it
+    /// isn't in `ReturnAttributes`, installation_proxy omits it from the
+    /// response.
+    pub(super) async fn survey_user_apps(provider: &dyn IdeviceProvider) -> Option<AppSurvey> {
+        let apps = lookup_apps(provider, None, false, "User").await.ok()?;
+        let count = apps.len();
+        let jailbreak = super::jailbreak::detect_in_apps(&apps);
+        // Filter out apps without an install date before picking the min;
+        // many devices return Some for every user app but a defensive
+        // filter keeps the comparator total.
+        let oldest = apps
+            .iter()
+            .filter_map(|app| app.install_date_unix.map(|ts| (ts, app)))
+            .min_by_key(|(ts, _)| *ts)
+            .map(|(ts, app)| OldestApp {
+                bundle_id: app.bundle_id.clone(),
+                display_name: app.name.clone(),
+                install_date_unix: ts,
+            });
+        Some(AppSurvey {
+            count,
+            oldest,
+            jailbreak,
+        })
     }
 
     /// Pair record creation time. Two standard locations on macOS — the

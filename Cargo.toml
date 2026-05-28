@@ -90,6 +90,22 @@ etherparse = "0.20"
 # attach per-packet comments which is how we smuggle pid/comm into Wireshark.
 pcap-file = "2.0"
 
+# SVG → PNG pipeline for `qk card`. `usvg` parses, `resvg` rasterises onto a
+# `tiny-skia` pixmap. `fontdb` is held by `usvg::Options` so we can register
+# the embedded JetBrains Mono bytes before parsing (`resvg` doesn't consult
+# system fonts on macOS reliably).
+resvg = "0.47"
+usvg = "0.47"
+tiny-skia = "0.12"
+# URL-encoding for the Twitter intent URL. The std-only alternative would
+# hand-roll percent-encoding; `urlencoding` is 30 lines and avoids the
+# usual escape-set off-by-ones.
+urlencoding = "2"
+# Encoding the embedded mascot PNG as a data-URI for the card's `<image>`
+# element. usvg/resvg parses `data:image/png;base64,…` natively; this lets
+# us ship a single self-contained SVG with no external file references.
+base64 = "0.22"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # Inline snapshots for render functions — locks in the printed layout so
