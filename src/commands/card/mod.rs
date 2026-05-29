@@ -90,8 +90,7 @@ const REPO_URL: &str = "https://github.com/dutradotdev/quokka";
 /// (including Enter, Esc, Q) exits cleanly. Skipped entirely if stdin
 /// isn't a terminal.
 fn prompt_for_star() -> Result<()> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
+    if !crate::ui::stdin_is_interactive() {
         return Ok(());
     }
 

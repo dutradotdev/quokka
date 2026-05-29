@@ -941,12 +941,15 @@ mod real {
             Ok(a) => a,
             Err(_) => return vec![(None, None, None); candidates.len()],
         };
-        let mut out = Vec::with_capacity(candidates.len());
-        for d in candidates {
+        // Probe every candidate concurrently. `join_all` preserves input
+        // order, so the result still zips 1:1 with `candidates` for the
+        // caller. A serial loop here meant N back-to-back lockdown handshakes
+        // on the `qk devices` and multi-device picker hot paths.
+        let probes = candidates.iter().map(|d| {
             let provider = d.to_provider(addr.clone(), "quokka-list");
-            out.push(read_identity_quick(&provider).await);
-        }
-        out
+            async move { read_identity_quick(&provider).await }
+        });
+        futures::future::join_all(probes).await
     }
 
     async fn read_identity_quick(
@@ -1168,22 +1171,31 @@ mod real {
                 .await
                 .map_err(|e| anyhow::Error::from(DeviceError::SyslogRelay(format!("{e:?}"))))?;
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<LogEntry>>(1024);
-            // The stream task is fire-and-forget — but a panic inside it
-            // would just drop the channel without telling the receiver why.
-            // Catch the join handle's panic and surface it through the
-            // channel so the TUI/plain renderer can show "stream ended"
-            // with the panic message rather than silently going quiet.
+            // The stream task is fire-and-forget. A panic inside it just drops
+            // the channel, which the receiver sees as a normal "stream ended".
+            // The watchdog below logs the panic to stderr so it isn't lost
+            // entirely — it can't be carried over the channel once the unwind
+            // has dropped the sender.
             let handle = tokio::spawn(async move {
                 // Continuation-aware: lines that start with whitespace
                 // append to the previous entry's message.
                 let mut pending: Option<LogEntry> = None;
                 loop {
-                    let raw = match syslog.next().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = tx.send(Err(anyhow!("syslog stream ended: {e:?}"))).await;
-                            break;
-                        }
+                    // Race `next()` against the receiver being dropped so the
+                    // syslog_relay service is released as soon as the consumer
+                    // exits. Without this a quiet device leaves the task
+                    // blocked in `next().await` indefinitely, holding the
+                    // service handle open — the same leak the pcapd path fixes.
+                    let raw = tokio::select! {
+                        biased;
+                        _ = tx.closed() => break,
+                        next = syslog.next() => match next {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = tx.send(Err(anyhow!("syslog stream ended: {e:?}"))).await;
+                                break;
+                            }
+                        },
                     };
                     if crate::commands::logs::parser::is_continuation(&raw) {
                         if let Some(prev) = pending.as_mut() {

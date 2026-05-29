@@ -6,12 +6,37 @@
 //! `owo-colors` honors `NO_COLOR`). `indicatif::ProgressDrawTarget::stderr()`
 //! hides spinners on non-TTY automatically.
 
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Placeholder shown when a value is unavailable. Always one char wide.
 pub const DASH: &str = "—";
+
+/// Escape hatch that forces every interactive gate off. Set it for scripts and
+/// CI — and the test suite relies on it, because `cargo test` keeps the real
+/// terminal attached (libtest only redirects the `print!` macros, not the file
+/// descriptors), so `is_terminal()` would otherwise be true and tests would
+/// launch prompts and TUIs against the developer's terminal.
+const NON_INTERACTIVE_ENV: &str = "QK_NON_INTERACTIVE";
+
+fn non_interactive_forced() -> bool {
+    std::env::var_os(NON_INTERACTIVE_ENV).is_some()
+}
+
+/// Whether quokka may drive interactive prompts on stdin (e.g. `dialoguer`
+/// confirmations, the `card` star prompt). False when stdin is not a terminal
+/// or when `QK_NON_INTERACTIVE` is set.
+pub fn stdin_is_interactive() -> bool {
+    !non_interactive_forced() && std::io::stdin().is_terminal()
+}
+
+/// Whether quokka may take over the screen with a full-screen TUI. False when
+/// stdout is not a terminal or when `QK_NON_INTERACTIVE` is set.
+pub fn stdout_is_interactive() -> bool {
+    !non_interactive_forced() && std::io::stdout().is_terminal()
+}
 
 /// Format a byte count in human-readable SI units (decimal, base 1000),
 /// matching how iOS itself reports storage. Always at least one decimal place

@@ -65,6 +65,11 @@ static TABLE: &[(&str, u32)] = &[
     ("iPhone17,3", 2024),
     ("iPhone17,4", 2024),
     ("iPhone17,5", 2024),
+    // iPhone 17 family (incl. iPhone Air) — 2025
+    ("iPhone18,1", 2025),
+    ("iPhone18,2", 2025),
+    ("iPhone18,3", 2025),
+    ("iPhone18,4", 2025),
 ];
 
 #[cfg(test)]
@@ -76,6 +81,7 @@ mod tests {
         assert_eq!(release_year("iPhone15,3"), Some(2022)); // 14 Pro Max
         assert_eq!(release_year("iPhone16,2"), Some(2023)); // 15 Pro Max
         assert_eq!(release_year("iPhone17,2"), Some(2024)); // 16 Pro
+        assert_eq!(release_year("iPhone18,2"), Some(2025)); // 17 Pro Max
         assert_eq!(release_year("iPhone10,3"), Some(2017)); // X
     }
 

@@ -1,7 +1,7 @@
 //! `quokka logs` — stream parsed syslog entries. Plain mode emits one line
 //! per entry to stdout; TUI mode renders a colored live viewer.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -34,7 +34,7 @@ impl Default for Options {
 
 pub async fn run(device: &dyn Device, opts: Options) -> Result<()> {
     let rx = device.stream_logs().await?;
-    let plain_mode = opts.no_tui || !std::io::stdout().is_terminal();
+    let plain_mode = opts.no_tui || !crate::ui::stdout_is_interactive();
     if plain_mode {
         plain::run(rx, opts).await
     } else {

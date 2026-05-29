@@ -1,9 +1,8 @@
 //! quokka — CLI to inspect and tidy an iPhone connected to a Mac over USB.
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 pub mod commands;
@@ -231,12 +230,24 @@ enum Command {
     },
 }
 
+/// `--json` is only wired into `info` and `devices`. Every other command
+/// would parse the global flag and silently ignore it, so we reject it up
+/// front rather than producing human output that looks like the flag did
+/// nothing.
+fn command_supports_json(command: Option<&Command>) -> bool {
+    matches!(command, Some(Command::Info { .. }) | Some(Command::Devices))
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    if cli.json && !command_supports_json(cli.command.as_ref()) {
+        bail!("--json is only supported by `info` and `devices`");
+    }
+
     // No subcommand + non-TTY (pipe/CI): the interactive launcher would be
     // invisible. Fall back to `--help` without touching the device.
-    if cli.command.is_none() && !std::io::stdout().is_terminal() {
+    if cli.command.is_none() && !crate::ui::stdout_is_interactive() {
         Cli::command().print_help()?;
         println!();
         return Ok(());
@@ -295,7 +306,7 @@ pub async fn run() -> Result<()> {
             // the rest of the CLI. On a TTY, drop them into the interactive
             // menu after the card prints so they discover the other commands;
             // pipes / CI keep the one-shot behaviour.
-            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            if crate::ui::stdin_is_interactive() {
                 commands::menu::run(&*device).await?;
             }
             Ok(())

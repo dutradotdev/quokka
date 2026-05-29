@@ -123,7 +123,7 @@ pub fn build_report(
     let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
     let by_kind = classify_by_kind(files);
     let (by_month, unknown_month) = bucket_by_month(files, now_unix);
-    let largest = top_n_by_size(files, TOP_LARGEST);
+    let largest = super::top_n_by_size(files, TOP_LARGEST);
     let duplicates = if find_duplicates {
         Some(find_duplicate_groups(files, TOP_DUPLICATES))
     } else {
@@ -202,13 +202,6 @@ fn previous_month(ym: YearMonth) -> YearMonth {
             month: ym.month - 1,
         }
     }
-}
-
-pub fn top_n_by_size(files: &[MediaFile], n: usize) -> Vec<MediaFile> {
-    let mut sorted = files.to_vec();
-    sorted.sort_by_key(|f| std::cmp::Reverse(f.size_bytes));
-    sorted.truncate(n);
-    sorted
 }
 
 pub fn find_duplicate_groups(files: &[MediaFile], top_n: usize) -> DuplicateReport {
@@ -473,15 +466,6 @@ mod tests {
         let ym = epoch_to_year_month(0);
         assert_eq!(ym.year, 1970);
         assert_eq!(ym.month, 1);
-    }
-
-    #[test]
-    fn top_n_truncates_and_sorts() {
-        let files = vec![mf("/a", 10, 0), mf("/b", 100, 0), mf("/c", 50, 0)];
-        let t = top_n_by_size(&files, 2);
-        assert_eq!(t.len(), 2);
-        assert_eq!(t[0].size_bytes, 100);
-        assert_eq!(t[1].size_bytes, 50);
     }
 
     #[test]

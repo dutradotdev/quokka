@@ -908,7 +908,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn row_cells(row: &DisplayRow) -> Row<'static> {
-    let time = format_time(row.pkt.seconds, row.pkt.microseconds);
+    let time = super::format_time(row.pkt.seconds, row.pkt.microseconds);
     let dir = PktDir::from_io_byte(row.pkt.io);
     let arrow_cell = match dir {
         PktDir::Out => Cell::from(Span::styled("↑", palette::ARROW_OUT)),
@@ -934,18 +934,6 @@ fn row_cells(row: &DisplayRow) -> Row<'static> {
         Cell::from(dst),
         Cell::from(format!("{bytes} B")),
     ])
-}
-
-fn format_time(seconds: u32, microseconds: u32) -> String {
-    // Same formula as the line renderer in mod.rs — duplicated here so
-    // the table cell builder doesn't need to round-trip through a String
-    // parse of the existing one-liner.
-    let secs = seconds as u64;
-    let hh = (secs / 3600) % 24;
-    let mm = (secs / 60) % 60;
-    let ss = secs % 60;
-    let ms = (microseconds / 1000) % 1000;
-    format!("{hh:02}:{mm:02}:{ss:02}.{ms:03}")
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {

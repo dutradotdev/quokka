@@ -17,12 +17,44 @@ use super::{owner_label, Direction, Endpoint, ParsedPacket};
 /// "histórico recente" without unbounded growth.
 pub const RECENT_CAP: usize = 20;
 
+/// Cap on distinct processes tracked before extras fold into the overflow
+/// bucket. Bounds memory on a long non-TTY `--hosts` capture where PID churn
+/// would otherwise grow `per_proc` without limit.
+const MAX_TRACKED_PROCS: usize = 256;
+/// Cap on distinct remote endpoints tracked per process, same rationale.
+const MAX_HOSTS_PER_PROC: usize = 256;
+
 #[derive(Debug, Default)]
 pub struct HostAggregator {
     pub(super) per_proc: std::collections::BTreeMap<
         (u32, String),
         std::collections::BTreeMap<(std::net::IpAddr, u16), HostStats>,
     >,
+    /// Aggregate of traffic dropped once a cap is hit. Keeps the displayed
+    /// totals honest without retaining a per-key breakdown.
+    overflow: OverflowStats,
+}
+
+/// Folded counters for processes / endpoints beyond the display caps.
+#[derive(Debug, Default)]
+struct OverflowStats {
+    packets: u64,
+    bytes_out: u64,
+    bytes_in: u64,
+}
+
+impl OverflowStats {
+    fn record(&mut self, dir: Direction, bytes: u64) {
+        self.packets += 1;
+        match dir {
+            Direction::Out => self.bytes_out += bytes,
+            Direction::In => self.bytes_in += bytes,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.packets == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,16 +114,31 @@ impl HostAggregator {
         let Some(port) = remote.port else {
             return;
         };
+        let bytes = p.data.len() as u64;
         let key = (p.pid, p.comm.clone());
-        let stats = self
-            .per_proc
-            .entry(key)
-            .or_default()
-            .entry((remote.ip, port))
+
+        // Cap distinct processes: a brand-new process beyond the limit folds
+        // into the overflow bucket instead of growing the map. Processes we
+        // already track always proceed so their running stats stay accurate.
+        // Cheap `len()` guard first so the `contains_key` traversal is
+        // skipped entirely in the common under-cap case.
+        if self.per_proc.len() >= MAX_TRACKED_PROCS && !self.per_proc.contains_key(&key) {
+            self.overflow.record(dir, bytes);
+            return;
+        }
+        let hosts = self.per_proc.entry(key).or_default();
+
+        // Cap distinct endpoints per process the same way.
+        let host_key = (remote.ip, port);
+        if hosts.len() >= MAX_HOSTS_PER_PROC && !hosts.contains_key(&host_key) {
+            self.overflow.record(dir, bytes);
+            return;
+        }
+        let stats = hosts
+            .entry(host_key)
             .or_insert_with(|| HostStats::new_at(at));
         stats.last_seen = at;
         stats.pkts += 1;
-        let bytes = p.data.len() as u64;
         match dir {
             Direction::Out => stats.bytes_out += bytes,
             Direction::In => stats.bytes_in += bytes,
@@ -141,6 +188,15 @@ impl HostAggregator {
                 );
             }
             let _ = writeln!(out);
+        }
+        if !self.overflow.is_empty() {
+            let _ = writeln!(
+                out,
+                "(+{} packets from capped processes/endpoints not shown — {} out / {} in)",
+                self.overflow.packets,
+                crate::ui::format_bytes(self.overflow.bytes_out),
+                crate::ui::format_bytes(self.overflow.bytes_in),
+            );
         }
         out
     }

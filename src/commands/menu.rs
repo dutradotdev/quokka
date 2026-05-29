@@ -5,7 +5,7 @@
 //! Non-TTY callers (pipes, CI) get clap's `--help` instead — see
 //! `lib.rs`. A multi-select picker would be invisible there.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use anyhow::Result;
 use crossterm::{cursor, execute, terminal};
@@ -153,7 +153,7 @@ fn clear_screen() -> Result<()> {
 }
 
 fn wait_for_continue() -> Result<()> {
-    if !std::io::stdin().is_terminal() {
+    if !crate::ui::stdin_is_interactive() {
         return Ok(());
     }
     let mut out = anstream::stdout();

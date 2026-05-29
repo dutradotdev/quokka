@@ -61,6 +61,11 @@ static TABLE: &[(&str, &str)] = &[
     ("iPhone17,3", "iPhone 16"),
     ("iPhone17,4", "iPhone 16 Plus"),
     ("iPhone17,5", "iPhone 16e"),
+    // iPhone 17 (2025)
+    ("iPhone18,1", "iPhone 17 Pro"),
+    ("iPhone18,2", "iPhone 17 Pro Max"),
+    ("iPhone18,3", "iPhone 17"),
+    ("iPhone18,4", "iPhone Air"),
 ];
 
 #[cfg(test)]
@@ -71,6 +76,8 @@ mod tests {
     fn known_identifier_resolves() {
         assert_eq!(friendly_name("iPhone15,3"), Some("iPhone 14 Pro Max"));
         assert_eq!(friendly_name("iPhone12,1"), Some("iPhone 11"));
+        assert_eq!(friendly_name("iPhone18,2"), Some("iPhone 17 Pro Max"));
+        assert_eq!(friendly_name("iPhone18,4"), Some("iPhone Air"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `quokka reboot` and `quokka shutdown` — destructive companion commands
 //! that drive the iPhone's power state through `diagnostics_relay`.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm};
@@ -48,7 +48,7 @@ pub async fn run(device: &dyn Device, action: Action, yes: bool) -> Result<()> {
         // The confirm prompt reads stdin, so that's the stream that has to
         // be a TTY. Checking stdout was a bug: `qk reboot | tee` in an
         // interactive shell would refuse even though the user could type.
-        if !std::io::stdin().is_terminal() {
+        if !crate::ui::stdin_is_interactive() {
             bail!(
                 "refusing to run a destructive action without confirmation. \
                  Re-run with `--yes` or run from an interactive terminal."

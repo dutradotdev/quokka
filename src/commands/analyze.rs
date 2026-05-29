@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use anyhow::{bail, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm};
@@ -13,7 +13,7 @@ use crate::ui::{format_bytes, spinner};
 const ROOTS: &[&str] = &["/DCIM", "/Downloads", "/Recordings", "/Books"];
 
 pub async fn run(device: &dyn Device, top: usize, delete: bool) -> Result<()> {
-    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let interactive = crate::ui::stdin_is_interactive() && crate::ui::stdout_is_interactive();
     if delete && !interactive {
         bail!("`--delete` is destructive and needs an interactive terminal. Re-run from a TTY.");
     }
@@ -28,10 +28,10 @@ pub async fn run(device: &dyn Device, top: usize, delete: bool) -> Result<()> {
         return Ok(());
     }
 
-    let sorted = sort_by_size(all);
-
     if !delete {
-        let top_n: Vec<MediaFile> = sorted.iter().take(top).cloned().collect();
+        // Read-only view only ever shows the top `top`, so skip the full
+        // sort and pull the largest with the bounded-heap helper.
+        let top_n = super::top_n_by_size(&all, top);
         let mut out = anstream::stdout();
         writeln!(
             out,
@@ -41,6 +41,8 @@ pub async fn run(device: &dyn Device, top: usize, delete: bool) -> Result<()> {
         return Ok(());
     }
 
+    // The delete picker needs the entire library ordered, not just the top N.
+    let sorted = sort_by_size(all);
     let outcome = tui::run(sorted).await?;
     match outcome {
         tui::Outcome::Quit => Ok(()),
@@ -71,29 +73,6 @@ async fn walk(device: &dyn Device) -> Result<Vec<MediaFile>> {
 pub fn sort_by_size(mut files: Vec<MediaFile>) -> Vec<MediaFile> {
     files.sort_by_key(|f| std::cmp::Reverse(f.size_bytes));
     files
-}
-
-pub fn top_n_by_size(files: Vec<MediaFile>, top: usize) -> Vec<MediaFile> {
-    // O(N log K) via min-heap of size K instead of O(N log N) full sort —
-    // matters on large media libraries where the read-only path only ever
-    // shows the top 20.
-    if top == 0 {
-        return Vec::new();
-    }
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-    // Min-heap (smallest size at the top) via Reverse on a max-heap.
-    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::with_capacity(top + 1);
-    for (i, f) in files.iter().enumerate() {
-        heap.push(Reverse((f.size_bytes, i)));
-        if heap.len() > top {
-            heap.pop();
-        }
-    }
-    let mut indices: Vec<(u64, usize)> = heap.into_iter().map(|r| r.0).collect();
-    // Heap order is not sorted — sort the survivors descending for output.
-    indices.sort_by_key(|b| Reverse(b.0));
-    indices.into_iter().map(|(_, i)| files[i].clone()).collect()
 }
 
 pub(crate) fn ext_lower(path: &str) -> String {
@@ -1091,22 +1070,6 @@ mod tests {
         assert_eq!(kind_from_ext("/Downloads/NOEXT"), "Other");
         assert_eq!(kind_from_ext("/x.weird"), "Other");
         assert_eq!(kind_from_ext(""), "Other");
-    }
-
-    #[test]
-    fn top_n_truncates_and_sorts_descending() {
-        let files = vec![mf("/a", 10), mf("/b", 100), mf("/c", 50), mf("/d", 1000)];
-        let top = top_n_by_size(files, 2);
-        assert_eq!(top.len(), 2);
-        assert_eq!(top[0].path, "/d");
-        assert_eq!(top[1].path, "/b");
-    }
-
-    #[test]
-    fn top_n_does_not_exceed_input_len() {
-        let files = vec![mf("/a", 10), mf("/b", 100)];
-        let top = top_n_by_size(files, 50);
-        assert_eq!(top.len(), 2);
     }
 
     #[test]

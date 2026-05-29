@@ -1,6 +1,6 @@
 # quokka 🐹
 
-> Inspect and clean an iPhone connected to your Mac over USB, from the terminal.
+> Inspect and clean a USB-connected iPhone from your terminal: storage, apps, media, and a live syslog viewer, no jailbreak.
 
 [![CI](https://github.com/dutradotdev/quokka/actions/workflows/ci.yml/badge.svg)](https://github.com/dutradotdev/quokka/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -14,6 +14,13 @@ elevated privileges.
 
 It is built on the Rust [`idevice`](https://github.com/jkcoxson/idevice) crate
 and works on iOS 17 and newer.
+
+## What you can do with it
+
+- **Tail the device syslog while you debug.** `qk logs` opens a TUI viewer that filters live logs by level or process, with search, pause, and save. `--no-tui` streams plain text for piping or CI.
+- **Free up space on a test device.** `qk analyze` ranks the heaviest media files and `qk media -d` groups likely duplicates; both can delete from an interactive picker.
+- **Manage installed apps by size.** `qk apps` lists user apps largest-first and uninstalls by bundle id, with `--yes` for scripts.
+- **Read device, system, and storage state.** `qk status` and `qk info` print it in clean blocks; `--redact` masks serial, UDID, IMEI, and MAC for safe screenshots.
 
 ## Quick start
 
@@ -43,7 +50,7 @@ below for `curl` and `cargo` alternatives.
 | `quokka reboot`   | Soft reboot via `diagnostics_relay`. Confirms by default; `--yes` skips.                                                        |
 | `quokka shutdown` | Power off via `diagnostics_relay`. Confirms by default; `--yes` skips.                                                          |
 | `quokka devices`  | List every iPhone reachable through `usbmuxd`. Does not select one.                                                             |
-| `quokka card`     | Render a 1080×1080 PNG snapshot of the iPhone — neofetch-style flex card. Saves to `~/Desktop` and opens in Preview by default. |
+| `quokka card`     | Render a 1080×1080 PNG snapshot of the iPhone, a neofetch-style flex card. Saves to `~/Desktop` and opens in Preview by default. |
 
 ## Examples
 
@@ -88,7 +95,7 @@ qk info                                 # 2+ devices on a TTY: opens an interact
 qk info                                 # 2+ devices in a pipe/CI without --udid: errors with a hint
 ```
 
-`--udid` is a global flag that works on every subcommand (long-only — there is
+`--udid` is a global flag that works on every subcommand (long-only; there is
 no `-d` short form because `qk media -d` already means `--find-duplicates`). It
 also reads from `QK_UDID` in the environment, so you can set it once per shell.
 
@@ -105,7 +112,7 @@ also reads from `QK_UDID` in the environment, so you can set it once per shell.
 ### Homebrew (recommended)
 
 ```sh
-brew install dutradotdev/tap/quokka
+brew install dutradotdev/tap/quokka-cli
 ```
 
 Works on Apple Silicon and Intel. `brew upgrade` keeps you on the latest

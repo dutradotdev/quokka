@@ -8,6 +8,16 @@ use quokka_cli::device::{App, Battery, DeviceStatus, FakeDevice, MediaFile, Stor
 /// Fixed clock anchor so relative-date output is deterministic.
 const NOW_UNIX: i64 = 1_779_793_200;
 
+/// Force every command down its non-interactive path. `cargo test` keeps the
+/// real terminal attached (libtest only redirects the `print!` macros, not the
+/// file descriptors), so a test that reaches a prompt or TUI would otherwise
+/// block on the developer's terminal and the non-tty assertions would not hold.
+/// Idempotent; call it from any test that drives a command which can go
+/// interactive (`apps` list, `analyze --delete`, `power` confirm, `card`).
+fn headless() {
+    std::env::set_var("QK_NON_INTERACTIVE", "1");
+}
+
 fn healthy_status() -> DeviceStatus {
     DeviceStatus {
         name: Some("Lucas's iPhone".into()),
@@ -160,6 +170,7 @@ fn sample_apps() -> Vec<App> {
 
 #[tokio::test]
 async fn apps_list_flow_renders_user_apps_against_fake() {
+    headless();
     let fake = FakeDevice {
         apps: Ok(sample_apps()),
         ..Default::default()
@@ -291,6 +302,7 @@ async fn analyze_no_files_succeeds_silently() {
 
 #[tokio::test]
 async fn analyze_delete_without_tty_errors() {
+    headless();
     let fake = FakeDevice {
         media: sample_media(),
         ..Default::default()
@@ -304,8 +316,9 @@ async fn analyze_delete_without_tty_errors() {
 
 #[test]
 fn analyze_top_n_picks_heaviest_files() {
-    use quokka_cli::commands::analyze::top_n_by_size;
-    let top = top_n_by_size(sample_media(), 2);
+    use quokka_cli::commands::top_n_by_size;
+    let media = sample_media();
+    let top = top_n_by_size(&media, 2);
     assert_eq!(top.len(), 2);
     assert_eq!(top[0].path, "/DCIM/100APPLE/IMG_0001.MOV");
     assert_eq!(top[1].path, "/Downloads/big.pdf");
@@ -476,6 +489,7 @@ async fn power_shutdown_with_yes_records_shutdown_call() {
 
 #[tokio::test]
 async fn power_without_yes_on_non_tty_aborts_with_message() {
+    headless();
     let fake = FakeDevice::default();
     let err = commands::power::run(&fake, commands::power::Action::Reboot, false)
         .await
@@ -791,6 +805,7 @@ async fn capture_run_with_app_filter_does_not_crash_on_misses() {
 
 #[tokio::test]
 async fn card_run_writes_a_1080x1080_png_to_the_given_path() {
+    headless();
     use quokka_cli::commands::card;
 
     let fake = quokka_cli::device::FakeDevice::with_status(healthy_status());

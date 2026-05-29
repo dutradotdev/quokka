@@ -171,7 +171,6 @@ impl Filter {
 }
 
 pub async fn run(device: &dyn Device, opts: Options) -> Result<()> {
-    use std::io::IsTerminal;
     use std::sync::atomic::Ordering;
 
     // Stream / Hosts normally use the interactive TUI (Phase 6). DNS / SNI
@@ -183,7 +182,7 @@ pub async fn run(device: &dyn Device, opts: Options) -> Result<()> {
     // file) we fall through to the line renderer for Stream/Hosts too,
     // so the smoke-test and pipeline cases keep working without an
     // interactive shell.
-    let tty = std::io::stdout().is_terminal();
+    let tty = crate::ui::stdout_is_interactive();
     if tty && matches!(opts.mode, Mode::Stream | Mode::Hosts) {
         return tui::run(device, opts).await;
     }
@@ -1094,6 +1093,29 @@ mod tests {
         assert!(rendered.contains("31.13.65.36:443"));
         assert!(rendered.contains("pkts"));
         assert!(rendered.contains(" out  /  "));
+    }
+
+    #[test]
+    fn host_aggregator_caps_processes_and_folds_overflow() {
+        // One shared remote endpoint, many distinct pids — well past the
+        // internal process cap so the aggregator must stop growing and fold
+        // the rest into the overflow bucket instead of leaking memory.
+        let parsed = {
+            let pkt = packet_with_payload(1, "proc", ipv4_tcp_payload());
+            parse_summary(&pkt).unwrap()
+        };
+        let mut agg = HostAggregator::new();
+        for pid in 0..300u32 {
+            let mut pkt = packet_with_payload(1, "proc", ipv4_tcp_payload());
+            pkt.pid = pid;
+            agg.add(&pkt, &parsed);
+        }
+        assert_eq!(agg.per_proc.len(), 256, "process map must be capped");
+        let rendered = agg.render("Last update: 12:00:00 (capturing for 1s)");
+        assert!(
+            rendered.contains("not shown"),
+            "overflow note must appear once the cap is exceeded"
+        );
     }
 
     #[test]

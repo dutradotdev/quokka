@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm};
@@ -29,7 +29,7 @@ async fn list_flow(device: &dyn Device) -> Result<()> {
 
     // Non-TTY (pipe, CI): no checkbox menu would be visible — enrich
     // silently and print the final list as text.
-    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let interactive = crate::ui::stdin_is_interactive() && crate::ui::stdout_is_interactive();
     if !interactive {
         let noop: BatchCallback = Box::new(|_| {});
         let full = user_apps_by_size(device.with_dynamic_sizes(basic, noop).await?);
@@ -133,7 +133,7 @@ async fn uninstall_flow(device: &dyn Device, bundle_id: &str, assume_yes: bool) 
     })?;
     let target = &target;
 
-    let is_interactive = std::io::stdin().is_terminal();
+    let is_interactive = crate::ui::stdin_is_interactive();
     let mut input = std::io::stdin().lock();
     let mut output = anstream::stdout();
     confirm_uninstall(target, assume_yes, is_interactive, &mut input, &mut output)?;
