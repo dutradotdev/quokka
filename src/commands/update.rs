@@ -67,6 +67,16 @@ pub async fn run(check_only: bool, assume_yes: bool) -> Result<()> {
         return Ok(());
     }
 
+    // The cargo-dist installer always writes to `~/.cargo/bin`. If the running
+    // `qk` came from another package manager (Homebrew), that copy sits earlier
+    // on PATH and shadows the freshly installed one — the update "succeeds" but
+    // running `qk` still reports the old version. Detect this up front and point
+    // the user at the manager that actually owns the binary, instead of silently
+    // installing into a shadowed location.
+    if let Some(mgr) = external_manager(current_exe_path().as_deref()) {
+        bail!("{}", mgr.update_guidance());
+    }
+
     if !assume_yes {
         if !crate::ui::stdin_is_interactive() {
             bail!("refusing to update without a TTY; pass --yes to override");
@@ -139,6 +149,51 @@ async fn run_installer(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Absolute path of the running executable, as a lossy string. `None` when the
+/// platform can't report it — callers treat that as "no external manager
+/// detected" so a missing path never blocks an otherwise-valid update.
+fn current_exe_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// A package manager other than the cargo-dist installer that owns the running
+/// binary. The self-updater can't safely install over these, so it defers to
+/// them instead.
+#[derive(Debug, PartialEq, Eq)]
+enum ExternalManager {
+    Homebrew,
+}
+
+impl ExternalManager {
+    /// Actionable message explaining why the self-update was skipped and how to
+    /// update through the owning manager instead.
+    fn update_guidance(&self) -> String {
+        match self {
+            ExternalManager::Homebrew => "this `qk` was installed by Homebrew, which shadows the \
+                 self-updater's `~/.cargo/bin` target on your PATH — installing here would have no \
+                 effect. Update it with:\n  brew upgrade quokka-cli\nor remove the Homebrew copy \
+                 first to let `qk update` manage it:\n  brew uninstall quokka-cli"
+                .to_string(),
+        }
+    }
+}
+
+/// Detect whether the running binary is owned by an external package manager.
+/// Homebrew installs land under a `/Cellar/` prefix (the `bin` symlinks in
+/// `/opt/homebrew/bin` resolve there), so a path containing `/Cellar/` is the
+/// reliable signal on both Apple-silicon (`/opt/homebrew`) and Intel
+/// (`/usr/local`) layouts.
+fn external_manager(exe_path: Option<&str>) -> Option<ExternalManager> {
+    let path = exe_path?;
+    if path.contains("/Cellar/") {
+        Some(ExternalManager::Homebrew)
+    } else {
+        None
+    }
+}
+
 /// True if `a` is a strictly higher semver than `b`. Treats anything that
 /// fails to parse as "not newer" so a malformed remote tag never triggers
 /// an unwanted reinstall.
@@ -159,7 +214,7 @@ fn is_newer(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{installer_url, is_newer};
+    use super::{external_manager, installer_url, is_newer, ExternalManager};
 
     #[test]
     fn installer_url_pins_the_confirmed_tag_not_latest() {
@@ -178,6 +233,40 @@ mod tests {
         assert!(is_newer("1.0.0", "0.99.99"));
         assert!(!is_newer("0.2.1", "0.2.1"));
         assert!(!is_newer("0.2.0", "0.2.1"));
+    }
+
+    #[test]
+    fn homebrew_install_is_detected_as_external() {
+        // Apple-silicon brew bin symlinks resolve into the Cellar.
+        assert_eq!(
+            external_manager(Some("/opt/homebrew/Cellar/quokka-cli/0.2.3/bin/qk")),
+            Some(ExternalManager::Homebrew)
+        );
+        // Intel layout uses the same Cellar prefix under /usr/local.
+        assert_eq!(
+            external_manager(Some("/usr/local/Cellar/quokka-cli/0.2.3/bin/qk")),
+            Some(ExternalManager::Homebrew)
+        );
+    }
+
+    #[test]
+    fn cargo_bin_install_is_not_external() {
+        // The self-updater's own target must never be flagged, or `qk update`
+        // would refuse to ever update a cargo-dist install.
+        assert_eq!(external_manager(Some("/Users/x/.cargo/bin/qk")), None);
+    }
+
+    #[test]
+    fn missing_exe_path_is_not_external() {
+        // An unknowable path must not block an otherwise-valid update.
+        assert_eq!(external_manager(None), None);
+    }
+
+    #[test]
+    fn homebrew_guidance_names_the_brew_commands() {
+        let msg = ExternalManager::Homebrew.update_guidance();
+        assert!(msg.contains("brew upgrade quokka-cli"));
+        assert!(msg.contains("brew uninstall quokka-cli"));
     }
 
     #[test]
