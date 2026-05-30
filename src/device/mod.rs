@@ -1484,11 +1484,18 @@ mod real {
         Ok(raw.into_iter().filter_map(parse_app).collect())
     }
 
-    // Tuned by the `sweep_batch_and_concurrency` e2e bench: (16, 8) was
-    // 1.11× faster than the previous (8, 4) default on a 299-app device.
-    // Re-run the bench on a new iOS major before changing these.
+    // Correctness over speed: concurrency is pinned to 1. The e2e bench once
+    // tuned this to (16, 8) for wall-clock (1.11× faster than (8, 4) on a
+    // 299-app device), but that bench only measured time — never how many
+    // apps came back with `DynamicDiskUsage = 0`. On current iOS, 8 parallel
+    // `browse`s overwhelm `installd`'s on-device container sizing: the heaviest
+    // containers blow the time budget and the device returns 0 dynamic for
+    // them (Insta360 et al. showing an empty cache column). Serializing lets
+    // each app's size compute in full — the reliable single-bundle regime the
+    // `app()` lookup already relies on. If a future bench reintroduces
+    // concurrency, gate it on completeness (zero-dynamic count), not speed.
     pub(super) const BATCH_SIZE: usize = 16;
-    pub(super) const MAX_CONCURRENT: usize = 8;
+    pub(super) const MAX_CONCURRENT: usize = 1;
 
     /// Enrich `apps` with `DynamicDiskUsage` via parallel batched `browse`s.
     /// Each batch is scoped to a small `BundleIDs` set; concurrency caps the
