@@ -1,6 +1,6 @@
 [package]
 name = "quokka-cli"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "CLI to inspect and tidy an iPhone connected over USB to a Mac."
 license = "MIT"
