@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
+pub mod app;
 pub mod commands;
 pub mod device;
 pub mod ui;

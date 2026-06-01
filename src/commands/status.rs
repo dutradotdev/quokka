@@ -11,7 +11,7 @@ use crate::ui::{now_unix, spinner, terminal_width};
 
 pub async fn run(device: &dyn Device) -> Result<()> {
     let bar = spinner("Reading device info...");
-    let status = device.status().await;
+    let status = crate::app::status(device).await;
     bar.finish_and_clear();
 
     let status = status?;

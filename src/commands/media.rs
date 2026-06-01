@@ -14,13 +14,19 @@ const TOP_LARGEST: usize = 10;
 const TOP_DUPLICATES: usize = 10;
 
 pub async fn run(device: &dyn Device, find_duplicates: bool) -> Result<()> {
-    let files = collect_media(device).await?;
+    let bar = spinner("Walking media files...");
+    let bar_for_cb = bar.clone();
+    let on_progress: WalkCallback = Box::new(move |p: WalkProgress| {
+        bar_for_cb.set_message(format!(
+            "Walking media files... {} files, {}",
+            p.files_seen,
+            format_bytes(p.bytes_seen)
+        ));
+    });
+    let report = crate::app::media(device, find_duplicates, on_progress).await;
+    bar.finish_and_clear();
     let mut out = anstream::stdout();
-    write!(
-        out,
-        "{}",
-        report(&files, find_duplicates, device.media_roots())
-    )?;
+    write!(out, "{}", render(&report?))?;
     Ok(())
 }
 
@@ -43,22 +49,7 @@ fn roots_label(roots: &[&str]) -> String {
         .join(", ")
 }
 
-async fn collect_media(device: &dyn Device) -> Result<Vec<MediaFile>> {
-    let bar = spinner("Walking media files...");
-    let bar_for_cb = bar.clone();
-    let on_progress: WalkCallback = Box::new(move |p: WalkProgress| {
-        bar_for_cb.set_message(format!(
-            "Walking media files... {} files, {}",
-            p.files_seen,
-            format_bytes(p.bytes_seen)
-        ));
-    });
-    let result = device.afc_walk(device.media_roots(), on_progress).await;
-    bar.finish_and_clear();
-    result
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Photo,
     Video,
@@ -86,7 +77,9 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct YearMonth {
     pub year: i32,
     pub month: u32,
@@ -105,7 +98,8 @@ fn epoch_to_year_month(unix_seconds: i64) -> YearMonth {
     YearMonth { year, month }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaReport {
     pub total_files: usize,
     pub total_bytes: u64,
@@ -120,7 +114,8 @@ pub struct MediaReport {
     pub duplicates: Option<DuplicateReport>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DuplicateReport {
     pub group_count: usize,
     pub file_count: usize,
@@ -128,7 +123,8 @@ pub struct DuplicateReport {
     pub top_groups: Vec<DuplicateGroup>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DuplicateGroup {
     pub size_bytes: u64,
     pub kind: Kind,

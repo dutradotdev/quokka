@@ -9,7 +9,6 @@ use crate::device::{Device, DeviceInfo};
 use crate::ui::spinner;
 
 const LABEL_WIDTH: usize = 18;
-const REDACT_VISIBLE_TAIL: usize = 4;
 
 pub async fn run(device: &dyn Device, redact: bool, json: bool) -> Result<()> {
     let bar = spinner("Reading device info...");
@@ -165,24 +164,10 @@ fn format_model(info: &DeviceInfo) -> String {
 
 fn maybe_redact(value: &str, redact: bool) -> String {
     if redact {
-        redact_tail(value, REDACT_VISIBLE_TAIL)
+        crate::app::redact::tail(value)
     } else {
         value.to_string()
     }
-}
-
-/// Mask `value` to a fixed-width form `***…XXXX` that keeps the last
-/// `visible_tail` characters but hides the original length. Previously the
-/// number of stars matched the source length, which leaked field length
-/// (low-grade signal for some keys, but no reason to keep when redacting).
-pub fn redact_tail(value: &str, visible_tail: usize) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    let len = chars.len();
-    if len <= visible_tail {
-        return "*".repeat(len);
-    }
-    let tail: String = chars[len - visible_tail..].iter().collect();
-    format!("***…{tail}")
 }
 
 fn yes_no(v: bool) -> &'static str {
@@ -251,17 +236,6 @@ mod tests {
         let mut info = full_info();
         info.model_friendly = None;
         assert_eq!(format_model(&info), "iPhone16,2");
-    }
-
-    #[test]
-    fn redact_tail_keeps_last_n_chars() {
-        // Fixed-width prefix (`***…`) hides the original length while still
-        // showing the last `n` chars. Inputs shorter than the tail mask
-        // every char to avoid revealing the suffix's identity.
-        assert_eq!(redact_tail("350123456789012", 4), "***…9012");
-        assert_eq!(redact_tail("AA:BB:CC:DD:EE:FF", 4), "***…E:FF");
-        assert_eq!(redact_tail("abc", 4), "***");
-        assert_eq!(redact_tail("", 4), "");
     }
 
     #[test]

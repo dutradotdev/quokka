@@ -895,3 +895,155 @@ async fn card_renders_with_storage_breakdown_fallback_when_ios_omits_categories(
     assert!(!svg.contains("photos"));
     assert!(!svg.contains("apps      "));
 }
+
+// ---------------------------------------------------------------------------
+// Facade (`quokka_cli::app`) — the surface the CLI, `--json`, and the GUI all
+// consume. These assert on the returned DTOs (not on rendered text) and pin the
+// serializable contract via serde round-trips.
+// ---------------------------------------------------------------------------
+mod facade {
+    use quokka_cli::app;
+    use quokka_cli::device::{
+        BatchUpdate, DeviceError, DeviceInfo, FakeDevice, MediaFile, WalkProgress,
+    };
+
+    const NOW: i64 = 1_716_854_400; // 2024-05-28 UTC
+
+    fn noop_walk() -> quokka_cli::device::WalkCallback {
+        Box::new(|_p: WalkProgress| {})
+    }
+
+    fn noop_batch() -> quokka_cli::device::BatchCallback {
+        Box::new(|_u: BatchUpdate| {})
+    }
+
+    /// Serialize → deserialize → serialize is a fixed point, pinning the IPC
+    /// contract the GUI and `--json` depend on.
+    fn assert_round_trips<T>(value: &T)
+    where
+        T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        let json = serde_json::to_string(value).expect("serialize");
+        let back: T = serde_json::from_str(&json).expect("deserialize");
+        let again = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(json, again, "round-trip changed the payload");
+    }
+
+    #[tokio::test]
+    async fn status_returns_seeded_snapshot() {
+        let fake = FakeDevice::default();
+        let status = app::status(&fake).await.expect("status ok");
+        assert_eq!(status.name.as_deref(), Some("Test iPhone"));
+    }
+
+    #[tokio::test]
+    async fn status_error_surfaces_as_device_error() {
+        let fake = FakeDevice::with_status_error("simulated lockdown failure");
+        let err = app::status(&fake).await.expect_err("should error");
+        // The fake's stringly error isn't a typed DeviceError, so it lands in
+        // `Other` — but it still carries the message and serializes cleanly.
+        assert!(matches!(err, DeviceError::Other(_)));
+        assert!(err.to_string().contains("simulated lockdown failure"));
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(json["kind"], "Other");
+    }
+
+    #[tokio::test]
+    async fn info_redacts_pii_when_requested() {
+        let fake = FakeDevice {
+            info: DeviceInfo {
+                name: "Lucas's iPhone".into(),
+                model_identifier: "iPhone16,2".into(),
+                serial: "F2LXXXXXXXXX".into(),
+                udid: "00008130-001A2B3C".into(),
+                os_version: "18.2".into(),
+                imei: Some("350123456789012".into()),
+                ..DeviceInfo::default()
+            },
+            ..Default::default()
+        };
+        let plain = app::info(&fake, false).await.expect("info ok");
+        assert_eq!(plain.serial, "F2LXXXXXXXXX");
+        let masked = app::info(&fake, true).await.expect("info ok");
+        assert!(masked.serial.starts_with("***…"));
+        assert_eq!(masked.imei.as_deref(), Some("***…9012"));
+        // Non-sensitive fields stay readable.
+        assert_eq!(masked.name, "Lucas's iPhone");
+    }
+
+    #[tokio::test]
+    async fn media_builds_report_and_round_trips() {
+        let fake = FakeDevice::default();
+        let report = app::media(&fake, true, noop_walk())
+            .await
+            .expect("media ok");
+        assert!(report.total_files > 0);
+        assert!(report.duplicates.is_some());
+        assert_round_trips(&report);
+    }
+
+    #[tokio::test]
+    async fn analyze_sorts_files_and_flags_live_photos() {
+        // A .MOV next to a matching .HEIC is the live-photo-motion signal.
+        let fake = FakeDevice {
+            media: vec![
+                MediaFile {
+                    path: "/DCIM/100APPLE/IMG_0001.MOV".into(),
+                    size_bytes: 50,
+                    modified_unix: 1_700_000_000,
+                },
+                MediaFile {
+                    path: "/DCIM/100APPLE/IMG_0001.HEIC".into(),
+                    size_bytes: 9000,
+                    modified_unix: 1_700_000_000,
+                },
+            ],
+            ..Default::default()
+        };
+        let report = app::analyze(&fake, NOW, noop_walk())
+            .await
+            .expect("analyze ok");
+        assert_eq!(report.total_files, 2);
+        // Sorted largest-first.
+        assert_eq!(report.files[0].size_bytes, 9000);
+        let live = report
+            .marks
+            .iter()
+            .find(|m| m.label.contains("Live Photo"))
+            .expect("live-photo mark present");
+        assert_eq!(live.paths, vec!["/DCIM/100APPLE/IMG_0001.MOV".to_string()]);
+        assert_round_trips(&report);
+    }
+
+    #[tokio::test]
+    async fn delete_files_records_each_path() {
+        let fake = FakeDevice::default();
+        let paths = vec!["/DCIM/103APPLE/IMG_4521.MOV".to_string()];
+        let outcome = app::delete_files(&fake, &paths).await.expect("delete ok");
+        assert_eq!(outcome.deleted, paths);
+        assert!(outcome.failed.is_empty());
+        assert_eq!(*fake.deleted.lock().unwrap(), paths);
+        assert_round_trips(&outcome);
+    }
+
+    #[tokio::test]
+    async fn card_renders_png_and_serializes() {
+        let fake = FakeDevice::default();
+        let rendered = app::card(&fake, NOW, false).await.expect("card ok");
+        assert!(!rendered.png.is_empty(), "PNG bytes should be produced");
+        assert!(rendered.svg.contains("<svg"));
+        // RenderedCard is Serialize-only (CardData holds &'static str): assert
+        // it serializes to a JSON object with the keys the GUI reads.
+        let value = serde_json::to_value(&rendered).expect("serialize");
+        assert!(value.get("svg").is_some());
+        assert!(value.get("png").is_some());
+        assert!(value.get("data").is_some());
+    }
+
+    #[tokio::test]
+    async fn apps_enriches_and_returns_user_apps() {
+        let fake = FakeDevice::default();
+        let apps = app::apps(&fake, noop_batch()).await.expect("apps ok");
+        assert!(!apps.is_empty());
+    }
+}
