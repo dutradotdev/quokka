@@ -72,7 +72,7 @@ forensic-adb = "=0.8.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 async-trait = "0.1"
 # JSON output for `--json` on `qk info` / `qk devices`. Other commands
 # still print plain text; expanding coverage is a follow-up.
