@@ -25,7 +25,8 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Two `CardData` values with identical fields render to byte-identical SVG.
 /// Tests guarantee this by injecting a fixed `now`; production runs are
 /// idempotent within the same UTC day.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CardData {
     // ---- header row ----
     /// Marketing model name (e.g. `"iPhone 14 Pro Max"`), or `None` to fall
@@ -96,7 +97,7 @@ pub struct CardData {
 
 /// The "good / warn / bad" colour tier a stat is rendered with. Drives the
 /// battery bar tint as well.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum HealthTier {
     Good,
     Warn,
@@ -106,7 +107,8 @@ pub enum HealthTier {
 }
 
 /// Three categories + free for the storage block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageBreakdownRows {
     pub camera_label: String,
     pub apps_label: String,
@@ -119,7 +121,8 @@ pub struct StorageBreakdownRows {
 }
 
 /// One row of the TOP APPS section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TopApp {
     pub display_name: String,
     pub size_label: String,
@@ -128,7 +131,8 @@ pub struct TopApp {
 }
 
 /// Single-bar fallback when iOS did not return a breakdown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageFallback {
     pub used_label: String,
     pub total_label: String,
@@ -136,7 +140,7 @@ pub struct StorageFallback {
     pub used_percent: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AppsJailbreakLabel {
     Pristine,
     Jailbroken,
@@ -713,6 +717,23 @@ mod tests {
             is_beta_build: false,
             ..DeviceStatus::default()
         }
+    }
+
+    #[test]
+    fn card_data_serializes_to_camel_case_json_object() {
+        // `CardData` is Serialize-only: `Badge` holds `&'static str`, so
+        // `Deserialize` is impossible without allocating, and the GUI only ever
+        // serializes Rust → JSON. This pins that one direction — a projected
+        // card must produce a JSON object with the camelCase keys the GUI reads.
+        let card = project(&base_status(), NOW, false);
+        let value = serde_json::to_value(&card).expect("serialize");
+        assert!(value.is_object(), "card should serialize to a JSON object");
+        assert!(value.get("iosLabel").is_some(), "expected camelCase key");
+        assert!(value.get("footerDate").is_some(), "expected camelCase key");
+        assert!(
+            value.get("ios_label").is_none(),
+            "snake_case key leaked into the IPC surface"
+        );
     }
 
     #[test]

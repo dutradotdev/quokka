@@ -7,7 +7,7 @@ use super::data::BadgeInputs;
 
 /// All 18 badge ids. The variant order is **not** the priority order —
 /// that lives in [`priority_for`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum BadgeId {
     Untouchable,
     BatteryChamp,
@@ -31,7 +31,7 @@ pub enum BadgeId {
 
 /// Colour family of a badge — drives fill / stroke / title / subtitle
 /// colours when rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum BadgeColor {
     Good,
     Warn,
@@ -40,7 +40,8 @@ pub enum BadgeColor {
 }
 
 /// A single renderable badge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Badge {
     pub id: BadgeId,
     pub title: &'static str,

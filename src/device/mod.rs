@@ -8,7 +8,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
 mod android;
@@ -69,6 +70,45 @@ pub enum DeviceError {
 
     #[error("{0}")]
     Other(String),
+}
+
+impl DeviceError {
+    /// Machine-readable variant name, used as the `kind` field when this
+    /// error is serialized. The GUI branches on `kind`; the CLI shows the
+    /// human `message`. Kept in sync with the variants by the exhaustive
+    /// match (a new variant fails to compile until it's listed here).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            DeviceError::NotPaired => "NotPaired",
+            DeviceError::Usbmuxd(_) => "Usbmuxd",
+            DeviceError::Lockdown(_) => "Lockdown",
+            DeviceError::AfcUnreachable(_) => "AfcUnreachable",
+            DeviceError::InstallationProxy(_) => "InstallationProxy",
+            DeviceError::DiagnosticsRelay(_) => "DiagnosticsRelay",
+            DeviceError::SyslogRelay(_) => "SyslogRelay",
+            DeviceError::AdbNotFound => "AdbNotFound",
+            DeviceError::NoAndroidDevice => "NoAndroidDevice",
+            DeviceError::AndroidUnauthorized(_) => "AndroidUnauthorized",
+            DeviceError::AdbCommandFailed(_) => "AdbCommandFailed",
+            DeviceError::Other(_) => "Other",
+        }
+    }
+}
+
+/// Serializes as `{ "kind": "<Variant>", "message": "<Display>" }` so the GUI
+/// (and `--json`) get a stable, machine-branchable shape while reusing the
+/// actionable `Display` text. `Serialize` only — nothing deserializes a
+/// `DeviceError` back into Rust (the GUI reads the JSON in JS).
+impl Serialize for DeviceError {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("DeviceError", 2)?;
+        state.serialize_field("kind", self.kind())?;
+        state.serialize_field("message", &self.to_string())?;
+        state.end()
+    }
 }
 
 /// Streaming update from [`Device::with_dynamic_sizes`] — one fires per
@@ -2323,6 +2363,25 @@ mod tests {
             data: vec![0xde, 0xad, 0xbe, 0xef],
         };
         assert_serde_round_trips(&packet);
+    }
+
+    #[test]
+    fn device_error_serializes_kind_and_message() {
+        // The GUI branches on `kind`; the CLI shows `message`. A unit variant
+        // and a tuple variant both serialize to the same `{ kind, message }`
+        // shape, with `kind` = variant name and `message` = the Display text.
+        let err = DeviceError::NotPaired;
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["kind"], "NotPaired");
+        assert_eq!(
+            value["message"],
+            "device is not paired with this Mac — unlock the iPhone and tap 'Trust this computer'"
+        );
+
+        let err = DeviceError::Other("boom".into());
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["kind"], "Other");
+        assert_eq!(value["message"], "boom");
     }
 
     #[test]
