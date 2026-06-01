@@ -62,10 +62,12 @@ idevice = { version = "=0.1.61", default-features = false, features = [
 
 # Android transport: talks the adb protocol to a local adb server on
 # 127.0.0.1:5037. Pinned with `=` for the same reason as `idevice` — a
-# fast-moving pre-/early-1.0-style surface we want to absorb deliberately.
-# `default-features = false` keeps `usb` (rusb/libusb, a C dep) and `mdns` off:
-# server mode is pure-Rust and needs neither.
-adb_client = { version = "=3.2.1", default-features = false }
+# fast-moving pre-1.0 surface we want to absorb deliberately. Chosen over
+# `adb_client` because it has no `rsa` dependency: server mode lets the adb
+# daemon do the device auth, so pulling in `rsa` (RUSTSEC-2023-0071, the
+# unpatched "Marvin Attack" timing sidechannel) was dead weight that still
+# flagged every downstream supply-chain scan. forensic-adb's tree is crypto-free.
+forensic-adb = "=0.8.1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 clap = { version = "4", features = ["derive", "env"] }

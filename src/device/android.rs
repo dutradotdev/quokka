@@ -1,13 +1,14 @@
 //! Android backend behind the [`Device`](super::Device) trait, talking to a
-//! local `adb` server over the adb protocol via the [`adb_client`] crate
-//! (server mode — no USB/libusb). Continuous `logcat` is the one exception: it
-//! still spawns the `adb` binary, because streaming a long-lived shell maps
-//! cleanly onto a child process and channel.
+//! local `adb` server over the adb protocol via the [`forensic_adb`] crate
+//! (async, server mode — it connects to the daemon's TCP port and lets the
+//! daemon do device auth, so the tree carries no `rsa`/crypto deps). Continuous
+//! `logcat` is the one exception: it still spawns the `adb` binary, because
+//! streaming a long-lived shell maps cleanly onto a child process and channel.
 //!
 //! This mirrors the isolation of the iOS `mod real`: nothing about adb — no
-//! `adb_client` type, command string, or output shape — leaks past this
+//! `forensic_adb` type, command string, or output shape — leaks past this
 //! module. The commands only ever see quokka's own neutral types, and
-//! [`RustADBError`] is collapsed to [`DeviceError`] at the boundary.
+//! forensic-adb's `DeviceError` is collapsed to [`DeviceError`] at the boundary.
 //!
 //! Non-rooted Android limits what is cheaply available, so some fields degrade
 //! to best-effort the same way the iOS backend degrades unavailable lockdown
@@ -24,16 +25,12 @@
 //! clear "iOS only" error.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::Ipv4Addr;
 use std::process::Stdio;
 
-use adb_client::{
-    server::{ADBServer, DeviceShort, DeviceState},
-    server_device::ADBServerDevice,
-    ADBDeviceExt, RebootType, RustADBError,
-};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use forensic_adb::{AndroidStorageInput, DeviceError as AdbError, Host};
 use tokio::process::Command;
 
 use super::{
@@ -60,12 +57,6 @@ const ADB_SERVER_PORT: u16 = 5037;
 
 pub(super) struct AndroidDevice {
     serial: String,
-    /// Address of the local `adb` server this device is reached through. Every
-    /// operation builds a fresh [`ADBServerDevice`] against it inside
-    /// `spawn_blocking`, so the struct stays `Send + Sync` with no shared
-    /// mutable connection — mirroring how the old code spawned a stateless
-    /// `adb` process per call.
-    server_addr: SocketAddrV4,
 }
 
 impl AndroidDevice {
@@ -73,51 +64,24 @@ impl AndroidDevice {
     /// `--udid`) pins a specific one; otherwise the single online device is
     /// used, and 2+ without a serial is an error.
     pub(super) async fn connect(target_serial: Option<&str>) -> Result<Self> {
-        let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, ADB_SERVER_PORT);
-        let devices =
-            tokio::task::spawn_blocking(move || -> Result<Vec<AdbDevice>, DeviceError> {
-                let mut server = ADBServer::new(server_addr);
-                let listed = server.devices().map_err(map_adb_err)?;
-                Ok(listed.into_iter().map(AdbDevice::from).collect())
-            })
-            .await
-            .map_err(|e| {
-                DeviceError::AdbCommandFailed(format!("adb devices task panicked: {e}"))
-            })??;
+        let devices = list_adb_devices().await?;
         let serial = select_serial(devices, target_serial)?;
-        Ok(Self {
-            serial,
-            server_addr,
-        })
+        Ok(Self { serial })
     }
 
-    /// Run a blocking `adb_client` operation against a fresh device handle on
-    /// the blocking pool, collapsing a join panic and the typed [`DeviceError`]
-    /// into one `Result`. Every device-scoped trait method routes through here,
-    /// so the connect-and-run plumbing lives in exactly one place. `op` only
-    /// names the operation for the panic message.
-    async fn with_device<F, T>(&self, op: &'static str, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut ADBServerDevice) -> Result<T, DeviceError> + Send + 'static,
-        T: Send + 'static,
-    {
-        let serial = self.serial.clone();
-        let server_addr = self.server_addr;
-        tokio::task::spawn_blocking(move || {
-            let mut device = ADBServerDevice::new(serial, Some(server_addr));
-            f(&mut device)
-        })
-        .await
-        .map_err(|e| DeviceError::AdbCommandFailed(format!("adb {op} task panicked: {e}")))?
-        .map_err(anyhow::Error::from)
+    /// A fresh forensic-adb device handle for this serial — see
+    /// [`connect_adb_device`].
+    async fn device(&self) -> Result<forensic_adb::Device> {
+        connect_adb_device(self.serial.clone()).await
     }
 
     /// Run a shell command on the device through the adb server and return its
-    /// stdout. A non-zero exit status (when the device reports one — shell
-    /// protocol v2) is surfaced as an error, matching the old `adb shell`
-    /// behaviour the parsers were written against.
+    /// stdout. forensic-adb's `shell:` transport returns stdout without an exit
+    /// status, so a failing command surfaces as empty/partial output rather
+    /// than an error — the same shape plain `adb shell` gives, and what the
+    /// tolerant parsers downstream already absorb.
     async fn shell(&self, command: &[&str]) -> Result<String> {
-        // adb_client sends one command line to the device shell, which then
+        // The whole command line is handed to the device shell, which then
         // word-splits it. Single-quote every argument so values carrying
         // spaces, tabs, or newlines — the `find -printf` format, media paths —
         // survive as one token instead of being re-split into broken args.
@@ -126,21 +90,8 @@ impl AndroidDevice {
             .map(|arg| shell_single_quote(arg))
             .collect::<Vec<_>>()
             .join(" ");
-        self.with_device("shell", move |device| {
-            let mut stdout = Vec::new();
-            let status = device
-                .shell_command(&cmdline, Some(&mut stdout), None)
-                .map_err(map_adb_err)?;
-            let text = String::from_utf8_lossy(&stdout).into_owned();
-            match status {
-                Some(code) if code != 0 => Err(DeviceError::AdbCommandFailed(format!(
-                    "`{cmdline}` exited with status {code}: {}",
-                    text.trim()
-                ))),
-                _ => Ok(text),
-            }
-        })
-        .await
+        let device = self.device().await?;
+        adb_result(device.execute_host_shell_command(&cmdline).await)
     }
 
     /// Read a single `getprop` key, `None` when empty or unreadable.
@@ -304,11 +255,19 @@ impl Device for AndroidDevice {
     }
 
     async fn uninstall_app(&self, bundle_id: &str) -> Result<()> {
-        let bundle_id = bundle_id.to_string();
-        self.with_device("uninstall", move |device| {
-            device.uninstall(&bundle_id, None).map_err(map_adb_err)
-        })
-        .await
+        // `adb uninstall` is `pm uninstall`; the shell transport gives no exit
+        // status, so confirm success from the output the way forensic-adb's own
+        // `pm clear` wrapper does ("Success" / "Failure [reason]").
+        let out = self.shell(&["pm", "uninstall", bundle_id]).await?;
+        if out.contains("Success") {
+            Ok(())
+        } else {
+            Err(DeviceError::AdbCommandFailed(format!(
+                "uninstall {bundle_id} failed: {}",
+                out.trim()
+            ))
+            .into())
+        }
     }
 
     fn media_roots(&self) -> &'static [&'static str] {
@@ -316,12 +275,12 @@ impl Device for AndroidDevice {
     }
 
     async fn afc_walk(&self, roots: &[&str], on_progress: WalkCallback) -> Result<Vec<MediaFile>> {
-        // SYNC `list`/`stat` were considered but rejected: in adb_client 3.2.1
-        // both report file size as `u32`, which wraps for media over 4 GiB —
+        // The adb SYNC `list`/`stat` services were considered but rejected:
+        // they report file size as `u32`, which wraps for media over 4 GiB —
         // exactly the large videos this walk exists to surface. `find -printf`
-        // gives a 64-bit size in one round trip per root, so it stays (now over
-        // the adb_client shell transport). `find_media_under` owns the toybox
-        // fallback; here we just orchestrate the roots and report progress.
+        // gives a 64-bit size in one round trip per root, so it stays (over the
+        // shell transport). `find_media_under` owns the toybox fallback; here we
+        // just orchestrate the roots and report progress.
         let mut files = Vec::new();
         let mut printf_unsupported = false;
         for &root in roots {
@@ -377,16 +336,18 @@ impl Device for AndroidDevice {
     }
 
     async fn reboot(&self) -> Result<()> {
-        self.with_device("reboot", |device| {
-            device.reboot(RebootType::System).map_err(map_adb_err)
-        })
-        .await
+        // The adb `reboot:` host service (empty target = reboot to system) — the
+        // daemon ACKs and returns before the device goes down, so this resolves
+        // cleanly rather than racing the dropped connection a `shell reboot`
+        // would.
+        let device = self.device().await?;
+        adb_result(device.execute_host_command("reboot:", false, false).await).map(|_| ())
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // `adb_client`'s `RebootType` has no power-off variant, so this stays a
-        // shell `reboot -p` (toybox/OEM dependent — validated on a real device
-        // by the e2e-android suite, never in CI).
+        // There is no adb power-off service, so this stays a shell `reboot -p`
+        // (toybox/OEM dependent — validated on a real device by the e2e-android
+        // suite, never in CI).
         self.shell(&["reboot", "-p"]).await?;
         Ok(())
     }
@@ -434,17 +395,31 @@ fn spawn_error(e: std::io::Error) -> DeviceError {
     }
 }
 
-/// Map a blocking `adb_client` error to a typed [`DeviceError`]. The crate's
-/// error enum is large (40-plus variants); we collapse it to the cases the UI
-/// branches on, keeping every `adb_client` type sealed inside this module.
-fn map_adb_err(error: RustADBError) -> DeviceError {
+/// Map a forensic-adb error to a typed [`DeviceError`], collapsing it to the
+/// cases the UI branches on and keeping every `forensic_adb` type sealed inside
+/// this module. A `NotFound` I/O error keeps the "adb missing" mapping for
+/// safety, and an unknown serial becomes the no-device case.
+fn map_adb_err(error: AdbError) -> DeviceError {
     match error {
-        RustADBError::IOError(io) if io.kind() == std::io::ErrorKind::NotFound => {
-            DeviceError::AdbNotFound
-        }
-        RustADBError::DeviceNotFound(_) => DeviceError::NoAndroidDevice,
+        AdbError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => DeviceError::AdbNotFound,
+        AdbError::UnknownDevice(_) => DeviceError::NoAndroidDevice,
         other => DeviceError::AdbCommandFailed(other.to_string()),
     }
+}
+
+/// Collapse a forensic-adb result into quokka's `anyhow::Result`, routing the
+/// error through [`map_adb_err`] so no `forensic_adb` type escapes the module.
+fn adb_result<T>(result: Result<T, AdbError>) -> Result<T> {
+    result.map_err(|e| map_adb_err(e).into())
+}
+
+/// Build a forensic-adb device handle for `serial`. The handle holds no live
+/// socket — each operation opens its own TCP connection to the adb server — so
+/// building one per call is cheap and keeps [`AndroidDevice`] stateless,
+/// mirroring how the old code spawned a handle per call.
+/// `AndroidStorageInput::Auto` only affects push/pull (unused here).
+async fn connect_adb_device(serial: String) -> Result<forensic_adb::Device> {
+    adb_result(forensic_adb::Device::new(adb_host(), serial, AndroidStorageInput::Auto).await)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,20 +435,49 @@ struct AdbDevice {
     state: AdbState,
 }
 
-impl From<DeviceShort> for AdbDevice {
-    /// Collapse adb's many connection states into the three quokka acts on:
-    /// ready, needs-authorization, or otherwise unusable.
-    fn from(device: DeviceShort) -> Self {
-        let state = match device.state {
-            DeviceState::Device => AdbState::Device,
-            DeviceState::Unauthorized => AdbState::Unauthorized,
-            _ => AdbState::Offline,
-        };
-        AdbDevice {
-            serial: device.identifier,
-            state,
-        }
+/// A [`Host`] pointing at the local adb server. We pin `127.0.0.1` rather than
+/// use `Host::default()`'s `"localhost"`: the adb daemon binds IPv4 only, so a
+/// `localhost` that resolves to `::1` first would burn a refused connection
+/// before falling back. [`ADB_SERVER_PORT`] stays the single source of truth.
+fn adb_host() -> Host {
+    Host {
+        host: Some(Ipv4Addr::LOCALHOST.to_string()),
+        port: Some(ADB_SERVER_PORT),
     }
+}
+
+/// List every adb-known device with its connection state.
+///
+/// forensic-adb's typed `Host::devices()` drops everything but online (`device`)
+/// entries, which would hide the unauthorized/offline cases quokka reports
+/// specifically. So we read the raw `host:devices-l` output and parse the state
+/// column ourselves with [`parse_device_line`].
+async fn list_adb_devices() -> Result<Vec<AdbDevice>> {
+    let raw = adb_result(
+        adb_host()
+            .execute_host_command("devices-l", true, true)
+            .await,
+    )?;
+    Ok(raw.lines().filter_map(parse_device_line).collect())
+}
+
+/// Parse one `adb devices -l` line — `"<serial> <state> [k:v ...]"` — into an
+/// [`AdbDevice`], collapsing adb's many connection states into the three quokka
+/// acts on: ready, needs-authorization, or otherwise unusable. The `List of
+/// devices attached` header and blank lines yield `None`.
+fn parse_device_line(line: &str) -> Option<AdbDevice> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("List of devices") {
+        return None;
+    }
+    let mut cols = line.split_whitespace();
+    let serial = cols.next()?.to_string();
+    let state = match cols.next()? {
+        "device" => AdbState::Device,
+        "unauthorized" => AdbState::Unauthorized,
+        _ => AdbState::Offline,
+    };
+    Some(AdbDevice { serial, state })
 }
 
 /// Pick which serial to target, mirroring the iOS connect semantics.
@@ -517,23 +521,16 @@ fn select_serial(devices: Vec<AdbDevice>, target: Option<&str>) -> Result<String
 /// adb server yields an empty list, never an error, so cross-platform
 /// autodetect can count devices without aborting the command.
 pub(super) async fn online_serials() -> Vec<String> {
-    let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, ADB_SERVER_PORT);
-    tokio::task::spawn_blocking(move || {
-        let mut server = ADBServer::new(server_addr);
-        server
-            .devices()
-            .map(|listed| {
-                listed
-                    .into_iter()
-                    .map(AdbDevice::from)
-                    .filter(|d| d.state == AdbState::Device)
-                    .map(|d| d.serial)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default()
+    list_adb_devices()
+        .await
+        .map(|devices| {
+            devices
+                .into_iter()
+                .filter(|d| d.state == AdbState::Device)
+                .map(|d| d.serial)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// List every adb-known device as a neutral [`DeviceListing`] for the merged
@@ -542,20 +539,11 @@ pub(super) async fn online_serials() -> Vec<String> {
 /// renderer shows a placeholder). Best-effort: an unreachable adb server yields
 /// an empty list, never an error.
 pub(super) async fn list_devices_impl() -> Result<Vec<DeviceListing>> {
-    let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, ADB_SERVER_PORT);
-    let devices = tokio::task::spawn_blocking(move || {
-        let mut server = ADBServer::new(server_addr);
-        server
-            .devices()
-            .map(|listed| listed.into_iter().map(AdbDevice::from).collect::<Vec<_>>())
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
+    let devices = list_adb_devices().await.unwrap_or_default();
 
     let listings = futures::future::join_all(devices.into_iter().map(|d| async move {
         let model = match d.state {
-            AdbState::Device => read_model(server_addr, &d.serial).await,
+            AdbState::Device => read_model(&d.serial).await,
             _ => None,
         };
         DeviceListing {
@@ -579,23 +567,17 @@ pub(super) async fn list_devices_impl() -> Result<Vec<DeviceListing>> {
     Ok(listings)
 }
 
-/// Read `ro.product.model` for one device off the blocking pool. `None` on any
-/// failure (device went offline mid-scan, empty value) so a single bad device
-/// never sinks the whole listing.
-async fn read_model(server_addr: SocketAddrV4, serial: &str) -> Option<String> {
-    let serial = serial.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut device = ADBServerDevice::new(serial, Some(server_addr));
-        let mut stdout = Vec::new();
-        device
-            .shell_command(&"getprop ro.product.model", Some(&mut stdout), None)
-            .ok()?;
-        let value = String::from_utf8_lossy(&stdout).trim().to_string();
-        (!value.is_empty()).then_some(value)
-    })
-    .await
-    .ok()
-    .flatten()
+/// Read `ro.product.model` for one device. `None` on any failure (device went
+/// offline mid-scan, empty value) so a single bad device never sinks the whole
+/// listing.
+async fn read_model(serial: &str) -> Option<String> {
+    let device = connect_adb_device(serial.to_string()).await.ok()?;
+    let value = device
+        .execute_host_shell_command("getprop ro.product.model")
+        .await
+        .ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Build an [`App`] from a bundle id and its `dumpsys diskstats` size. The name
@@ -813,26 +795,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adb_device_from_device_short_maps_states() {
-        let ready = AdbDevice::from(DeviceShort {
-            identifier: "ABC123".into(),
-            state: DeviceState::Device,
-        });
+    fn parse_device_line_maps_states_and_skips_header() {
+        // The `-l` long format carries trailing `key:value` pairs after the
+        // state; only the serial and state columns matter here.
+        let ready =
+            parse_device_line("ABC123  device product:sdk model:Pixel_7 device:panther").unwrap();
         assert_eq!(ready.serial, "ABC123");
         assert_eq!(ready.state, AdbState::Device);
 
-        let unauthorized = AdbDevice::from(DeviceShort {
-            identifier: "DEF456".into(),
-            state: DeviceState::Unauthorized,
-        });
+        let unauthorized = parse_device_line("DEF456  unauthorized").unwrap();
+        assert_eq!(unauthorized.serial, "DEF456");
         assert_eq!(unauthorized.state, AdbState::Unauthorized);
 
         // Every other adb state collapses to Offline (unusable).
-        let offline = AdbDevice::from(DeviceShort {
-            identifier: "GHI789".into(),
-            state: DeviceState::Recovery,
-        });
-        assert_eq!(offline.state, AdbState::Offline);
+        assert_eq!(
+            parse_device_line("GHI789  recovery").unwrap().state,
+            AdbState::Offline
+        );
+
+        // A network serial keeps its `host:port` shape intact.
+        assert_eq!(
+            parse_device_line("192.168.1.5:5555  device")
+                .unwrap()
+                .serial,
+            "192.168.1.5:5555"
+        );
+
+        // The header line and blank lines are not devices.
+        assert!(parse_device_line("List of devices attached").is_none());
+        assert!(parse_device_line("").is_none());
     }
 
     #[test]
