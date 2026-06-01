@@ -94,13 +94,18 @@ pub fn build_confirm_prompt(verb: &str, status: Option<&DeviceStatus>) -> String
 
 fn device_label(status: Option<&DeviceStatus>) -> String {
     let Some(s) = status else {
-        return "this iPhone".to_string();
+        return "this device".to_string();
     };
     match (s.name.as_deref(), s.model_friendly.as_deref()) {
         (Some(name), Some(model)) => format!("{name} ({model})"),
         (Some(name), None) => name.to_string(),
         (None, Some(model)) => model.to_string(),
-        (None, None) => "this iPhone".to_string(),
+        // No identity at all — name the platform if the backend gave one
+        // ("this Android device"), else stay neutral.
+        (None, None) => match s.os_name.as_deref() {
+            Some(os) => format!("this {os} device"),
+            None => "this device".to_string(),
+        },
     }
 }
 
@@ -137,7 +142,19 @@ mod tests {
     #[test]
     fn confirm_prompt_falls_back_when_status_missing() {
         let prompt = build_confirm_prompt("Shutdown", None);
-        assert!(prompt.contains("this iPhone"));
+        assert!(prompt.contains("this device"));
         assert!(prompt.contains("Shutdown"));
+    }
+
+    #[test]
+    fn confirm_prompt_names_platform_when_only_os_known() {
+        // No device name or model, but the backend reported the platform —
+        // the prompt names it rather than falling back to a bare "device".
+        let status = DeviceStatus {
+            os_name: Some("Android".into()),
+            ..Default::default()
+        };
+        let prompt = build_confirm_prompt("Reboot", Some(&status));
+        assert!(prompt.contains("this Android device"));
     }
 }

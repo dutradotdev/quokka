@@ -8,8 +8,6 @@ use crate::commands::analyze::{ext_lower, kind_from_ext};
 use crate::device::{Device, MediaFile, WalkCallback, WalkProgress};
 use crate::ui::{format_bytes, spinner};
 
-const MEDIA_ROOTS: &[&str] = &["/DCIM", "/Downloads", "/Recordings", "/Books"];
-const MEDIA_ROOTS_LABEL: &str = "DCIM, Recordings, Books, Downloads";
 const BUCKET_BAR_WIDTH: usize = 10;
 const MONTHS_SHOWN: usize = 12;
 const TOP_LARGEST: usize = 10;
@@ -17,11 +15,32 @@ const TOP_DUPLICATES: usize = 10;
 
 pub async fn run(device: &dyn Device, find_duplicates: bool) -> Result<()> {
     let files = collect_media(device).await?;
-    let now_unix = crate::ui::now_unix();
-    let report = build_report(&files, find_duplicates, now_unix, None);
     let mut out = anstream::stdout();
-    write!(out, "{}", render(&report))?;
+    write!(
+        out,
+        "{}",
+        report(&files, find_duplicates, device.media_roots())
+    )?;
     Ok(())
+}
+
+/// Build and render the survey report for already-walked `files`. Shared by
+/// [`run`] (which walks first with a spinner) and the sidebar launcher (which
+/// walks inline with progress, then hands the files here).
+pub fn report(files: &[MediaFile], find_duplicates: bool, roots: &[&str]) -> String {
+    let report = build_report(files, find_duplicates, crate::ui::now_unix(), None, roots);
+    render(&report)
+}
+
+/// Human-readable label for a set of AFC roots: each root's basename joined
+/// with commas (e.g. `"DCIM, Downloads, Recordings, Books"`). Derived from the
+/// roots so the label tracks whatever paths the active device exposes.
+fn roots_label(roots: &[&str]) -> String {
+    roots
+        .iter()
+        .map(|r| r.trim_start_matches('/'))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn collect_media(device: &dyn Device) -> Result<Vec<MediaFile>> {
@@ -34,7 +53,7 @@ async fn collect_media(device: &dyn Device) -> Result<Vec<MediaFile>> {
             format_bytes(p.bytes_seen)
         ));
     });
-    let result = device.afc_walk(MEDIA_ROOTS, on_progress).await;
+    let result = device.afc_walk(device.media_roots(), on_progress).await;
     bar.finish_and_clear();
     result
 }
@@ -91,6 +110,9 @@ pub struct MediaReport {
     pub total_files: usize,
     pub total_bytes: u64,
     pub device_name: Option<String>,
+    /// Display label for the roots that were walked, derived from them. The
+    /// report owns it so [`render`] stays free of platform path assumptions.
+    pub roots_label: String,
     pub by_kind: [(Kind, usize, u64); 4],
     pub by_month: Vec<(YearMonth, usize, u64)>,
     pub unknown_month: Option<(usize, u64)>,
@@ -118,6 +140,7 @@ pub fn build_report(
     find_duplicates: bool,
     now_unix: i64,
     device_name: Option<String>,
+    roots: &[&str],
 ) -> MediaReport {
     let total_files = files.len();
     let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
@@ -133,6 +156,7 @@ pub fn build_report(
         total_files,
         total_bytes,
         device_name,
+        roots_label: roots_label(roots),
         by_kind,
         by_month,
         unknown_month,
@@ -241,7 +265,7 @@ pub fn find_duplicate_groups(files: &[MediaFile], top_n: usize) -> DuplicateRepo
 
 pub fn render(report: &MediaReport) -> String {
     if report.total_files == 0 {
-        return format!("No files in {MEDIA_ROOTS_LABEL}.\n");
+        return format!("No files in {}.\n", report.roots_label);
     }
     let mut out = String::new();
     let header_name = report
@@ -252,9 +276,10 @@ pub fn render(report: &MediaReport) -> String {
     out.push_str(&header_name);
     out.push('\n');
     out.push_str(&format!(
-        "Scanned {} files ({}) under {MEDIA_ROOTS_LABEL}\n\n",
+        "Scanned {} files ({}) under {}\n\n",
         report.total_files,
-        format_bytes(report.total_bytes)
+        format_bytes(report.total_bytes),
+        report.roots_label
     ));
 
     // By kind
@@ -378,6 +403,18 @@ fn bar_for(value: u64, max: u64, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_ROOTS: &[&str] = &["/DCIM", "/Downloads", "/Recordings", "/Books"];
+
+    #[test]
+    fn roots_label_strips_slash_and_joins() {
+        assert_eq!(
+            roots_label(TEST_ROOTS),
+            "DCIM, Downloads, Recordings, Books"
+        );
+        assert_eq!(roots_label(&["/sdcard/DCIM"]), "sdcard/DCIM");
+        assert_eq!(roots_label(&[]), "");
+    }
 
     fn mf(path: &str, size: u64, mtime: i64) -> MediaFile {
         MediaFile {
@@ -532,7 +569,7 @@ mod tests {
 
     #[test]
     fn render_with_no_files_prints_short_line() {
-        let report = build_report(&[], false, 1_700_000_000, None);
+        let report = build_report(&[], false, 1_700_000_000, None, TEST_ROOTS);
         let out = render(&report);
         assert!(out.contains("No files"));
         assert!(out.contains("DCIM"));
@@ -541,7 +578,7 @@ mod tests {
     #[test]
     fn render_omits_duplicates_when_not_requested() {
         let files = vec![mf("/DCIM/a.HEIC", 100, 1_700_000_000)];
-        let report = build_report(&files, false, 1_700_000_000, None);
+        let report = build_report(&files, false, 1_700_000_000, None, TEST_ROOTS);
         let out = render(&report);
         assert!(!out.contains("Likely duplicates"));
         assert!(out.contains("By kind"));
@@ -554,7 +591,7 @@ mod tests {
             mf("/DCIM/a.HEIC", 100, 1_700_000_000),
             mf("/Downloads/b.HEIC", 100, 1_700_000_000),
         ];
-        let report = build_report(&files, true, 1_700_000_000, None);
+        let report = build_report(&files, true, 1_700_000_000, None, TEST_ROOTS);
         let out = render(&report);
         assert!(out.contains("Likely duplicates"));
     }

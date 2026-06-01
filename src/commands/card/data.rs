@@ -277,7 +277,7 @@ pub fn project(status: &DeviceStatus, now_unix: i64, redact: bool) -> CardData {
     let (storage_breakdown_rows, storage_fallback) =
         build_storage_view(status.storage.as_ref(), status.storage_breakdown.as_ref());
 
-    let ios_label = match (&status.ios_version, &status.ios_build) {
+    let ios_label = match (&status.os_version, &status.os_build) {
         (Some(v), Some(b)) if !redact => format!("iOS {v} ({b})"),
         (Some(v), _) => {
             if redact {
@@ -409,7 +409,7 @@ pub fn build_identity_label(status: &DeviceStatus) -> Option<String> {
         parts.push(format!("{n} apps"));
     }
     if let Some(major) = status
-        .ios_version
+        .os_version
         .as_deref()
         .and_then(|v| v.split('.').next())
         .and_then(|s| s.parse::<u32>().ok())
@@ -458,7 +458,7 @@ impl BadgeInputs {
             .last_backup_unix
             .map(|ts| (now_unix - ts).max(0) / SECONDS_PER_DAY);
         let ios_major = status
-            .ios_version
+            .os_version
             .as_deref()
             .and_then(|v| v.split('.').next())
             .and_then(|s| s.parse::<u32>().ok());
@@ -683,8 +683,8 @@ mod tests {
             model_friendly: Some("iPhone 14 Pro Max".into()),
             chip_name: Some("A16 Bionic".into()),
             enclosure_color: Some("Deep Purple".into()),
-            ios_version: Some("18.2".into()),
-            ios_build: Some("22C152".into()),
+            os_version: Some("18.2".into()),
+            os_build: Some("22C152".into()),
             storage: Some(Storage {
                 total_bytes: 256_000_000_000,
                 free_bytes: 148_500_000_000,
@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn ios_label_redact_keeps_major_minor_only() {
         let mut status = base_status();
-        status.ios_build = Some("22C152".into());
+        status.os_build = Some("22C152".into());
         let normal = project(&status, NOW, false);
         let redacted = project(&status, NOW, true);
         assert!(normal.ios_label.contains("(22C152)"));
@@ -1028,7 +1028,7 @@ mod tests {
         let mut s = base_status();
         s.oldest_app = None;
         s.app_count = None;
-        s.ios_version = None;
+        s.os_version = None;
         assert!(build_identity_label(&s).is_none());
     }
 

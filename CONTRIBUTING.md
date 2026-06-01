@@ -78,6 +78,7 @@ behaviour fails before it can merge.
 ```sh
 cargo test                  # layers 1 + 2 — what CI runs
 cargo test --features e2e   # layers 1 + 2 + 3 — needs an iPhone, plugged in and trusted
+cargo test --features e2e-android   # Android layer — needs an Android device over adb
 cargo test --test integration            # just the integration file
 cargo test -- format_bytes                # filter by test-name substring
 ```

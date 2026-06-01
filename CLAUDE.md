@@ -12,6 +12,7 @@ The contributor-facing docs cover the same ground for humans: `README.md`
 cargo build
 cargo test                  # unit + integration tests, no iPhone needed
 cargo test --features e2e   # adds tests that require a real iPhone over USB
+cargo test --features e2e-android   # adds tests that require a real Android over adb
 cargo run --bin quokka -- status
 cargo run --bin qk -- status        # short alias, same binary content
 cargo test --test <name>            # run a single integration test file
@@ -26,11 +27,11 @@ The repo pins `stable` via `rust-toolchain.toml` (the system default may be olde
 
 ## Architecture
 
-**The `Device` trait in `src/device/mod.rs` is the seam that makes the whole project testable.** Every iPhone operation goes through this trait. The real implementation lives in a private `mod real` submodule that talks to the [`idevice`](https://github.com/jkcoxson/idevice) crate; tests use the in-module `FakeDevice`. **No `idevice` type may be exposed through the public surface of `device/mod.rs`** — the `idevice` crate ships breaking changes at every point release until 0.2.0, and the seam exists to absorb them.
+**The `Device` trait in `src/device/mod.rs` is the seam that makes the whole project testable — and platform-agnostic.** Every device operation, iPhone **or** Android, goes through this trait. The iOS implementation lives in a private `mod real` submodule talking to the [`idevice`](https://github.com/jkcoxson/idevice) crate; the Android implementation in `mod android` talking to a local `adb` server via [`adb_client`](https://crates.io/crates/adb_client); tests use the in-module `FakeDevice`. **No `idevice` *or* `adb_client` type may be exposed through the public surface of `device/mod.rs`** — both crates ship breaking changes pre-1.0, and the seam exists to absorb them. Commands consume the trait and quokka's own neutral types only; **no command may branch on platform** (`if ios` / `if android`). If a command needs to know the platform, the trait leaked — fix the trait, not the command. Capabilities that exist on one platform only (packet capture is iOS-only) are exposed as a separate extension trait (`CaptureCapable`) reached via `Device::as_capture()`, not a platform check.
 
-When adding a capability (e.g. battery, app list, AFC walk), add a method to the `Device` trait and a corresponding implementation in `mod real`. Commands consume the trait, not `idevice` directly.
+When adding a capability (e.g. battery, app list, AFC walk), add a method to the `Device` trait and implement it in **both** `mod real` and `mod android` (Android degrades unavailable data to `None`/empty rather than failing). Commands consume the trait, not `idevice`/`adb_client` directly.
 
-The dependency is pinned with `=0.1.x` for the same reason. When bumping, re-do the API research before touching code — the `tools/src/` directory of the upstream repo is the canonical example of current usage.
+Both backend crates are pinned with `=` (idevice `=0.1.x`, adb_client `=3.2.x`) for the same reason. When bumping, re-do the API research before touching code — for `idevice`, the `tools/src/` directory of the upstream repo is the canonical example of current usage.
 
 ### Two binaries, one entry point
 
@@ -38,13 +39,20 @@ The dependency is pinned with `=0.1.x` for the same reason. When bumping, re-do 
 
 ### Command structure
 
-`run()` parses with clap, calls `device::connect()` once, then dispatches to `commands::{status,apps,analyze,menu}::run(&*device, ...)` — `menu` is the interactive launcher for a bare `quokka` on a TTY. The dispatch lives in `src/lib.rs`; per-command logic in `src/commands/`. `commands::dashboard` is not a dispatch target — it is the pure dashboard renderer reused by `status` and `menu`. UI helpers (byte formatting, blocks, progress bars) are centralized in `src/ui.rs` so every command renders consistently.
+`run()` parses with clap. Every subcommand connects once (`device::connect()`) and dispatches to `commands::{status,apps,analyze,…}::run(&*device, ...)`. The bare `quokka`/`qk` launcher is the exception — it owns its own device selection (so it can switch between connected devices), so `lib.rs` routes a no-subcommand TTY invocation to `commands::menu::run_launcher(udid, platform)` *before* the shared connect. The dispatch lives in `src/lib.rs`; per-command logic in `src/commands/`. `commands::dashboard` is not a dispatch target — it is the pure dashboard renderer reused by `status` and `menu`. UI helpers (byte formatting, blocks, progress bars) are centralized in `src/ui.rs` so every command renders consistently.
+
+`device::connect(udid, platform)` **autodetects across iOS (usbmuxd) and Android (adb)** when `--platform` is not forced: it cheaply enumerates both transports (best-effort — a missing `adb` or usbmuxd contributes zero devices, never an error), resolves an explicit `--udid` to its owning platform, uses a sole device directly, and on 2+ opens a cross-platform picker (TTY) or errors (non-TTY). `device::list_devices()` returns the same two transports merged (each `DeviceListing` carries its `platform`) for `qk devices`.
+
+The bare launcher's **default view is the ratatui sidebar** (`commands::sidebar`) for *any* connected device — left pane lists every device (one or more), right pane shows the selected device's dashboard over a capability-aware action menu, with devices connected lazily and cached. The single-device `dialoguer` menu (`menu::run`) is the fallback for an explicit `--udid`/`--platform` target, for no device at all (where `connect` surfaces the actionable error), and for the `qk card` post-render hand-off. Both launchers share `commands::device_action` (the `DeviceAction` enum + the single action→command dispatch) so they never duplicate it; each only owns its own row ordering. The action menu hides `Capture` on backends where `Device::as_capture()` is `None` (Android).
+
+When the sidebar launches an action it tears its terminal down completely (drops the `Terminal`, the `EventStream`, and the stderr silencer) so the sub-command — often its own full-screen TUI — runs on a pristine terminal exactly as the single-device menu does, then rebuilds a fresh guard on return. Nesting two ratatui terminals / crossterm event streams over one screen black-screened the sub-command, so this teardown is load-bearing, not incidental. While the sidebar owns the screen its `TerminalGuard` redirects stderr to `/dev/null`, since the device layer's best-effort `eprintln!` warnings (AFC skips, enrichment failures) would otherwise scribble over the frame. `analyze`/`media` run their AFC walk *inline* (progress on the action row, Esc/q to cancel) before the teardown, so the walk never drops into a bare-shell spinner.
 
 ### Test layers
 
 1. **Unit tests** (`#[cfg(test)]` next to the code) — pure logic, no hardware, no fake.
 2. **Integration tests** in `tests/integration.rs` — exercise commands against `FakeDevice`. The fake is what makes these possible without an iPhone.
 3. **E2E tests** in `tests/e2e_*.rs` behind `--features e2e` — drive the real `idevice` backend (`RealDevice`) against a physical iPhone over USB, through the same library entry points as the integration tests. **Never run in CI** — CI only compile-checks them.
+4. **Android E2E** in `tests/e2e_android.rs` behind `--features e2e-android` — drives the real `AndroidDevice` backend against a physical Android device over `adb`, through the same library entry point. Asserts at least one app reports a non-zero `dumpsys diskstats` size. Skips gracefully when no device is attached. **Never run in CI** — CI only compile-checks it.
 
 Always write unit and integration tests in the same change as the code, not after.
 
@@ -75,9 +83,11 @@ Always write unit and integration tests in the same change as the code, not afte
 - Crash logs, full backups, Wi-Fi pairing
 
 `qk apps` and `qk analyze --delete` open a ratatui interactive picker — `apps`
-streams live size updates as Phase 2 enrichment completes. `status`, read-only
-`analyze`, and the bare-`quokka` launcher print plain output blocks (the
-launcher's menu is a `dialoguer` select, not ratatui).
+streams live size updates as Phase 2 enrichment completes. `status` and
+read-only `analyze` print plain output blocks. The bare-`quokka` launcher is a
+ratatui sidebar (`commands::sidebar`) for any connected device; the
+`dialoguer` select survives only as the fallback for an explicit target, no
+device, and the `qk card` hand-off.
 
 `qk card` renders an SVG → PNG (1080×1080) via `resvg`/`usvg`/`tiny-skia` with
 JetBrains Mono embedded via `include_bytes!`. The renderer is a pure function

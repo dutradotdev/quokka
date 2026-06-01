@@ -1,5 +1,6 @@
-//! `quokka devices` — list every iPhone reachable through usbmuxd.
-//! Helps the user pick a `--udid` when multiple devices are plugged in.
+//! `quokka devices` — list every reachable device across both transports
+//! (iPhones over usbmuxd, Android over adb). Helps the user pick a `--udid`
+//! when multiple devices are plugged in.
 
 use std::io::Write;
 
@@ -7,6 +8,17 @@ use anyhow::Result;
 use owo_colors::OwoColorize;
 
 use crate::device::{list_devices, DeviceListing};
+
+/// Minimum column widths so headers and short rows stay aligned.
+const NAME_COL_MIN: usize = 4;
+const PLATFORM_COL_MIN: usize = 7;
+const MODEL_COL_MIN: usize = 5;
+const CONN_COL_WIDTH: usize = 5;
+
+/// Placeholder when a device hasn't been trusted/authorized yet, so its
+/// identity reads back empty.
+const UNTRUSTED_NAME: &str = "(untrusted)";
+const UNKNOWN_MODEL: &str = "?";
 
 pub async fn run(json: bool) -> Result<()> {
     let listings = list_devices().await?;
@@ -26,6 +38,7 @@ fn render_json(listings: &[DeviceListing]) -> String {
         .iter()
         .map(|d| {
             serde_json::json!({
+                "platform": d.platform,
                 "udid": d.udid,
                 "connection": d.connection,
                 "name": d.name,
@@ -40,45 +53,50 @@ fn render_json(listings: &[DeviceListing]) -> String {
 }
 
 /// Pure formatter shared by `run` and the unit tests: yields the
-/// "No iPhones connected." line when empty, otherwise the columnar render.
+/// "No devices connected." line when empty, otherwise the columnar render.
 pub fn format_listings(listings: &[DeviceListing]) -> String {
     if listings.is_empty() {
-        return "No iPhones connected.\n".to_string();
+        return "No devices connected.\n".to_string();
     }
     render(listings)
+}
+
+/// The human label for a device's model column, falling back from friendly
+/// name to raw identifier to `?`.
+fn model_label(d: &DeviceListing) -> &str {
+    d.model_friendly
+        .as_deref()
+        .or(d.model_identifier.as_deref())
+        .unwrap_or(UNKNOWN_MODEL)
 }
 
 pub fn render(listings: &[DeviceListing]) -> String {
     let name_w = listings
         .iter()
-        .map(|d| d.name.as_deref().unwrap_or("(untrusted)").chars().count())
+        .map(|d| d.name.as_deref().unwrap_or(UNTRUSTED_NAME).chars().count())
         .max()
-        .unwrap_or(4)
-        .max(4);
+        .unwrap_or(NAME_COL_MIN)
+        .max(NAME_COL_MIN);
+    let platform_w = listings
+        .iter()
+        .map(|d| d.platform.label().chars().count())
+        .max()
+        .unwrap_or(PLATFORM_COL_MIN)
+        .max(PLATFORM_COL_MIN);
     let model_w = listings
         .iter()
-        .map(|d| {
-            d.model_friendly
-                .as_deref()
-                .or(d.model_identifier.as_deref())
-                .unwrap_or("?")
-                .chars()
-                .count()
-        })
+        .map(|d| model_label(d).chars().count())
         .max()
-        .unwrap_or(5)
-        .max(5);
+        .unwrap_or(MODEL_COL_MIN)
+        .max(MODEL_COL_MIN);
 
     let mut out = String::new();
     for d in listings {
-        let name = d.name.as_deref().unwrap_or("(untrusted)");
-        let model = d
-            .model_friendly
-            .as_deref()
-            .or(d.model_identifier.as_deref())
-            .unwrap_or("?");
+        let name = d.name.as_deref().unwrap_or(UNTRUSTED_NAME);
         out.push_str(&format!(
-            "  {name:<name_w$}  {model:<model_w$}  {conn:<5}  {udid}\n",
+            "  {name:<name_w$}  {platform:<platform_w$}  {model:<model_w$}  {conn:<CONN_COL_WIDTH$}  {udid}\n",
+            platform = d.platform.label(),
+            model = model_label(d),
             conn = d.connection,
             udid = d.udid.dimmed(),
         ));
@@ -92,10 +110,11 @@ pub fn render(listings: &[DeviceListing]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::DeviceListing;
+    use crate::device::{DeviceListing, Platform};
 
     fn paired(udid: &str, name: &str, model: &str, friendly: &str) -> DeviceListing {
         DeviceListing {
+            platform: Platform::Ios,
             udid: udid.into(),
             connection: "USB",
             name: Some(name.into()),
@@ -104,10 +123,38 @@ mod tests {
         }
     }
 
+    fn android(udid: &str, model: &str) -> DeviceListing {
+        DeviceListing {
+            platform: Platform::Android,
+            udid: udid.into(),
+            connection: "USB",
+            name: Some(model.into()),
+            model_identifier: None,
+            model_friendly: Some(model.into()),
+        }
+    }
+
     #[test]
-    fn format_listings_empty_prints_no_iphones_message() {
+    fn format_listings_empty_prints_no_devices_message() {
         let out = format_listings(&[]);
-        assert_eq!(out, "No iPhones connected.\n");
+        assert_eq!(out, "No devices connected.\n");
+    }
+
+    #[test]
+    fn render_shows_platform_column_for_each_device() {
+        let out = render(&[
+            paired(
+                "UDID-1",
+                "Lucas's iPhone",
+                "iPhone16,2",
+                "iPhone 15 Pro Max",
+            ),
+            android("ABC123", "Pixel 8"),
+        ]);
+        assert!(out.contains("iOS"));
+        assert!(out.contains("Android"));
+        assert!(out.contains("Pixel 8"));
+        assert!(out.contains("2 devices connected."));
     }
 
     #[test]
@@ -146,6 +193,7 @@ mod tests {
     #[test]
     fn render_untrusted_falls_back_to_placeholder_name_and_question_mark_model() {
         let out = render(&[DeviceListing {
+            platform: Platform::Ios,
             udid: "UDID-X".into(),
             connection: "USB",
             name: None,
@@ -160,6 +208,7 @@ mod tests {
     #[test]
     fn render_falls_back_to_model_identifier_when_friendly_missing() {
         let out = render(&[DeviceListing {
+            platform: Platform::Ios,
             udid: "UDID-1".into(),
             connection: "USB",
             name: Some("Phone".into()),

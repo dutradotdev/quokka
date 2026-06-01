@@ -42,8 +42,8 @@ pub fn render_json(info: &DeviceInfo, redact: bool) -> String {
             "udid": mask(&info.udid),
         },
         "system": {
-            "ios_version": info.ios_version,
-            "ios_build": info.ios_build,
+            "ios_version": info.os_version,
+            "ios_build": info.os_build,
             "hardware_model": info.hardware_model,
             "cpu_architecture": info.cpu_architecture,
             "activation_state": info.activation_state,
@@ -116,9 +116,9 @@ pub fn render_device_block(info: &DeviceInfo, redact: bool) -> Option<String> {
 
 pub fn render_system_block(info: &DeviceInfo) -> Option<String> {
     let mut rows: Vec<(&str, String)> = Vec::new();
-    let ios = match &info.ios_build {
-        Some(build) => format!("{} (build {build})", info.ios_version),
-        None => info.ios_version.clone(),
+    let ios = match &info.os_build {
+        Some(build) => format!("{} (build {build})", info.os_version),
+        None => info.os_version.clone(),
     };
     rows.push(("iOS", ios));
     if let Some(v) = &info.hardware_model {
@@ -215,8 +215,8 @@ mod tests {
             enclosure_color: Some("Natural Titanium".into()),
             serial: "F2LXXXXXXXXX".into(),
             udid: "00008130-001A2B3C4D5E6F7G".into(),
-            ios_version: "18.2".into(),
-            ios_build: Some("22C152".into()),
+            os_version: "18.2".into(),
+            os_build: Some("22C152".into()),
             hardware_model: Some("D74AP".into()),
             cpu_architecture: Some("arm64e".into()),
             activation_state: Some("Activated".into()),
@@ -235,7 +235,7 @@ mod tests {
             model_identifier: "iPhone16,2".into(),
             serial: "F2L0000".into(),
             udid: "00008130-AAAA".into(),
-            ios_version: "18.2".into(),
+            os_version: "18.2".into(),
             ..Default::default()
         }
     }

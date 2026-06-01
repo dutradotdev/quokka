@@ -1055,7 +1055,10 @@ impl Drop for TerminalGuard {
 /// stream ends, or `--max` is reached. Requires a TTY on stdout; fails
 /// fast with a clear error otherwise so pipe consumers don't see a
 /// stuck-blank screen.
-pub async fn run(device: &dyn crate::device::Device, opts: super::Options) -> anyhow::Result<()> {
+pub async fn run(
+    cap: &dyn crate::device::CaptureCapable,
+    opts: super::Options,
+) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use crossterm::event::{Event, EventStream};
     use crossterm::{execute, terminal};
@@ -1080,7 +1083,7 @@ pub async fn run(device: &dyn crate::device::Device, opts: super::Options) -> an
         None => None,
     };
 
-    let stream = device.capture_packets().await?;
+    let stream = cap.capture_packets().await?;
     let crate::device::PacketStream { mut rx, dropped } = stream;
 
     // Order matters: construct the guard *before* the fallible

@@ -668,7 +668,7 @@ fn render_info_table(svg: &mut String, card: &CardData, y: i32) -> i32 {
 /// an inline `<tspan>` so resvg measures glyph advances itself — no
 /// hand-rolled px offset that can drift with font metrics.
 fn info_value(svg: &mut String, x: i32, y: i32, value: &str, tail_accent: Option<&str>) {
-    match tail_accent.and_then(|color| value.rfind(" · ").map(|i| (i, color))) {
+    match value.rfind(" · ").zip(tail_accent) {
         Some((i, color)) => {
             let head = xml_escape(&value[..i]);
             let tail = xml_escape(&value[i..]);

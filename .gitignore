@@ -4,3 +4,6 @@ Cargo.lock.bak
 .DS_Store
 .superpowers/
 out.pcapng
+
+# Personal, non-versioned strategic vision doc.
+docs/vision.md

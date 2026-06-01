@@ -7,11 +7,6 @@ use owo_colors::OwoColorize;
 use crate::device::{Device, MediaFile, WalkCallback, WalkProgress};
 use crate::ui::{format_bytes, spinner};
 
-/// Anything outside these roots is invisible to `analyze` — the safety
-/// guardrail that prevents a "select all + delete" from breaking Photos.app
-/// or sync state. See spec for the rationale before widening this list.
-const ROOTS: &[&str] = &["/DCIM", "/Downloads", "/Recordings", "/Books"];
-
 pub async fn run(device: &dyn Device, top: usize, delete: bool) -> Result<()> {
     let interactive = crate::ui::stdin_is_interactive() && crate::ui::stdout_is_interactive();
     if delete && !interactive {
@@ -19,39 +14,46 @@ pub async fn run(device: &dyn Device, top: usize, delete: bool) -> Result<()> {
     }
 
     let all = walk(device).await?;
-    let total_files = all.len();
-    let total_bytes: u64 = all.iter().map(|f| f.size_bytes).sum();
+
+    if delete {
+        return pick_and_delete(device, all).await;
+    }
 
     if all.is_empty() {
         let mut out = anstream::stdout();
         writeln!(out, "No files in DCIM, Downloads, Recordings, Books.")?;
         return Ok(());
     }
+    // Read-only view only ever shows the top `top`, so skip the full sort and
+    // pull the largest with the bounded-heap helper.
+    let total_files = all.len();
+    let total_bytes: u64 = all.iter().map(|f| f.size_bytes).sum();
+    let top_n = super::top_n_by_size(&all, top);
+    let mut out = anstream::stdout();
+    writeln!(
+        out,
+        "{}",
+        render_file_list(&top_n, total_files, total_bytes)
+    )?;
+    Ok(())
+}
 
-    if !delete {
-        // Read-only view only ever shows the top `top`, so skip the full
-        // sort and pull the largest with the bounded-heap helper.
-        let top_n = super::top_n_by_size(&all, top);
+/// Open the interactive delete picker over already-walked `files`, then confirm
+/// and delete the selection. Shared by [`run`] (delete mode, which walks first
+/// with a spinner) and the sidebar launcher (which walks inline with progress,
+/// then hands the files here). The whole library is needed ordered, not just a
+/// top-N slice.
+pub async fn pick_and_delete(device: &dyn Device, files: Vec<MediaFile>) -> Result<()> {
+    if files.is_empty() {
         let mut out = anstream::stdout();
-        writeln!(
-            out,
-            "{}",
-            render_file_list(&top_n, total_files, total_bytes)
-        )?;
+        writeln!(out, "No files in DCIM, Downloads, Recordings, Books.")?;
         return Ok(());
     }
-
-    // The delete picker needs the entire library ordered, not just the top N.
-    let sorted = sort_by_size(all);
-    let outcome = tui::run(sorted).await?;
-    match outcome {
+    let sorted = sort_by_size(files);
+    match tui::run(sorted).await? {
         tui::Outcome::Quit => Ok(()),
-        tui::Outcome::Picked(picked) => {
-            if picked.is_empty() {
-                return Ok(());
-            }
-            confirm_and_delete(device, &picked).await
-        }
+        tui::Outcome::Picked(picked) if picked.is_empty() => Ok(()),
+        tui::Outcome::Picked(picked) => confirm_and_delete(device, &picked).await,
     }
 }
 
@@ -65,7 +67,10 @@ async fn walk(device: &dyn Device) -> Result<Vec<MediaFile>> {
             format_bytes(p.bytes_seen)
         ));
     });
-    let result = device.afc_walk(ROOTS, on_progress).await;
+    // Anything outside the device's media roots is invisible to `analyze` —
+    // the safety guardrail that prevents a "select all + delete" from breaking
+    // Photos.app or sync state.
+    let result = device.afc_walk(device.media_roots(), on_progress).await;
     bar.finish_and_clear();
     result
 }

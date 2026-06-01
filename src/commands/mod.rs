@@ -3,12 +3,14 @@ pub mod apps;
 pub mod capture;
 pub mod card;
 pub mod dashboard;
+pub mod device_action;
 pub mod devices;
 pub mod info;
 pub mod logs;
 pub mod media;
 pub mod menu;
 pub mod power;
+pub mod sidebar;
 pub mod status;
 pub mod update;
 

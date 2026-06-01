@@ -23,8 +23,9 @@ fn healthy_status() -> DeviceStatus {
         name: Some("Lucas's iPhone".into()),
         model: Some("iPhone15,3".into()),
         model_friendly: Some("iPhone 14 Pro Max".into()),
-        ios_version: Some("18.2".into()),
-        ios_build: Some("22C152".into()),
+        os_name: Some("iOS".into()),
+        os_version: Some("18.2".into()),
+        os_build: Some("22C152".into()),
         enclosure_color: Some("Deep Purple".into()),
         storage: Some(Storage {
             total_bytes: 256_000_000_000,
@@ -449,7 +450,7 @@ async fn info_minimal_skips_network_block() {
             model_identifier: "iPhone16,2".into(),
             serial: "AAAA".into(),
             udid: "BBBB-CCCC".into(),
-            ios_version: "18.2".into(),
+            os_version: "18.2".into(),
             ..DeviceInfo::default()
         },
         ..Default::default()
@@ -555,6 +556,7 @@ fn media_build_report_includes_expected_sections() {
         true,
         1_779_840_000,
         Some("Test".into()),
+        &["/DCIM", "/Downloads", "/Recordings", "/Books"],
     );
     assert_eq!(report.total_files, 4);
     let out = commands::media::render(&report);
@@ -665,7 +667,11 @@ async fn capture_drains_seeded_packets_in_order() {
         ],
         ..Default::default()
     };
-    let mut stream = fake.capture_packets().await.unwrap();
+    // Packet capture lives behind the `CaptureCapable` capability now; an iOS
+    // backend (and the fake) expose it via `as_capture`, a non-iOS one returns
+    // `None`. Exercise the capability path the `capture` command uses.
+    let cap = fake.as_capture().expect("fake device supports capture");
+    let mut stream = cap.capture_packets().await.unwrap();
     let mut pids = Vec::new();
     while let Some(item) = stream.rx.recv().await {
         pids.push(item.unwrap().pid);

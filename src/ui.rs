@@ -38,6 +38,25 @@ pub fn stdout_is_interactive() -> bool {
     !non_interactive_forced() && std::io::stdout().is_terminal()
 }
 
+/// Block until the user presses Enter, after a dimmed prompt. No-op when stdin
+/// isn't interactive (pipes/CI) so non-TTY runs never hang. The launchers use
+/// it to keep a command's printed output on screen before redrawing over it.
+pub fn wait_for_enter() -> std::io::Result<()> {
+    use owo_colors::OwoColorize;
+    use std::io::Write;
+
+    if !stdin_is_interactive() {
+        return Ok(());
+    }
+    let mut out = anstream::stdout();
+    writeln!(out)?;
+    write!(out, "{} ", "Press Enter to continue...".dimmed())?;
+    out.flush()?;
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    Ok(())
+}
+
 /// Format a byte count in human-readable SI units (decimal, base 1000),
 /// matching how iOS itself reports storage. Always at least one decimal place
 /// above KB; bytes render as integers.

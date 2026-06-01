@@ -8,8 +8,10 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod android;
 pub mod build_version;
 pub mod chip_names;
 pub mod jailbreak;
@@ -47,6 +49,24 @@ pub enum DeviceError {
     #[error("syslog_relay unavailable: {0}")]
     SyslogRelay(String),
 
+    #[error(
+        "`adb` was not found on your PATH — install Android platform-tools \
+         (e.g. `brew install android-platform-tools`) to use --platform android"
+    )]
+    AdbNotFound,
+
+    #[error("no Android device is reachable over adb — connect one and enable USB debugging")]
+    NoAndroidDevice,
+
+    #[error(
+        "Android device {0} is unauthorized — unlock it and accept the \
+         'Allow USB debugging' prompt"
+    )]
+    AndroidUnauthorized(String),
+
+    #[error("adb command failed: {0}")]
+    AdbCommandFailed(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -64,7 +84,8 @@ pub struct BatchUpdate {
 pub type BatchCallback = Box<dyn Fn(BatchUpdate) + Send + Sync>;
 
 /// One file discovered during an AFC walk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaFile {
     /// Absolute path under the AFC root (e.g. `/DCIM/100APPLE/IMG_4521.MOV`).
     pub path: String,
@@ -74,7 +95,8 @@ pub struct MediaFile {
 }
 
 /// Cumulative progress reported during [`Device::afc_walk`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WalkProgress {
     pub files_seen: usize,
     pub bytes_seen: u64,
@@ -85,8 +107,9 @@ pub type WalkCallback = Box<dyn Fn(WalkProgress) + Send + Sync>;
 
 /// Static identity snapshot used by [`Device::info`]. Optional fields degrade
 /// silently to `None` on a per-key read failure — only the required fields
-/// (`name`, `model_identifier`, `serial`, `udid`, `ios_version`) abort.
-#[derive(Debug, Clone, Default)]
+/// (`name`, `model_identifier`, `serial`, `udid`, `os_version`) abort.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
     pub name: String,
     pub model_identifier: String,
@@ -97,8 +120,8 @@ pub struct DeviceInfo {
     pub serial: String,
     pub udid: String,
 
-    pub ios_version: String,
-    pub ios_build: Option<String>,
+    pub os_version: String,
+    pub os_build: Option<String>,
     pub hardware_model: Option<String>,
     pub cpu_architecture: Option<String>,
     pub activation_state: Option<String>,
@@ -112,7 +135,8 @@ pub struct DeviceInfo {
 }
 
 /// One log line from `com.apple.syslog_relay`, parsed to structured form.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub timestamp_unix_ms: Option<i64>,
     /// `HH:MM:SS` extracted verbatim from the syslog frame's BSD-style
@@ -126,7 +150,7 @@ pub struct LogEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -188,7 +212,8 @@ pub struct PacketStream {
 /// `0x0800` IPv4 — IPv6 detection is deferred to Phase 2), and cellular `pdp_ip*`
 /// payloads have their first 4 bytes (BSD loopback family) stripped. The whole
 /// blob is therefore safe to feed to an Ethernet parser as link_type 1.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Packet {
     /// Originating process pid as reported by pcapd.
     pub pid: u32,
@@ -218,6 +243,12 @@ pub enum PowerCall {
     Reboot,
     Shutdown,
 }
+
+/// AFC-relative media roots exposed by an iPhone. Shared by [`real::RealDevice`]
+/// and [`FakeDevice`] so tests walk the exact paths a real device does. The
+/// list is returned through [`Device::media_roots`] so commands never hard-code
+/// platform paths.
+const IOS_MEDIA_ROOTS: &[&str] = &["/DCIM", "/Downloads", "/Recordings", "/Books"];
 
 #[async_trait]
 pub trait Device: Send + Sync {
@@ -257,6 +288,12 @@ pub trait Device: Send + Sync {
     /// that need that distinction should `app()` first.
     async fn uninstall_app(&self, bundle_id: &str) -> Result<()>;
 
+    /// AFC-relative roots that `analyze` and `media` walk for user media.
+    /// The device owns this list because the paths are platform-specific —
+    /// commands must call this instead of hard-coding `/DCIM` etc., so a
+    /// non-iOS backend stays a drop-in behind the trait.
+    fn media_roots(&self) -> &'static [&'static str];
+
     /// Recursively list every file under each of `roots` via AFC. `roots`
     /// are AFC-relative paths (e.g. `"/DCIM"`). `on_progress` fires
     /// periodically with cumulative counts so the UI can show live updates.
@@ -285,6 +322,21 @@ pub trait Device: Send + Sync {
     /// receiver is dropped or the device disconnects.
     async fn stream_logs(&self) -> Result<tokio::sync::mpsc::Receiver<Result<LogEntry>>>;
 
+    /// Packet capture is iOS-only — it relies on `com.apple.pcapd`. Backends
+    /// that cannot capture return `None`, and the `capture` command turns that
+    /// into a clear "iOS only" error instead of forcing every backend to stub a
+    /// pcapd session it can't open. The iOS backend returns `Some(self)`.
+    fn as_capture(&self) -> Option<&dyn CaptureCapable> {
+        None
+    }
+}
+
+/// Live packet capture over `com.apple.pcapd`. Split out of [`Device`] because
+/// it is iOS-only — reach it through [`Device::as_capture`]. Implemented by the
+/// real iOS backend (and [`FakeDevice`] for tests); a non-iOS backend simply
+/// does not implement it and leaves `as_capture` returning `None`.
+#[async_trait]
+pub trait CaptureCapable: Send + Sync {
     /// Open a streaming pcapd session. The returned [`PacketStream`] carries
     /// both the receiver and a shared drop counter — producers that can't
     /// keep up with the consumer increment `dropped` rather than blocking.
@@ -293,7 +345,8 @@ pub trait Device: Send + Sync {
     async fn capture_packets(&self) -> Result<PacketStream>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct App {
     pub bundle_id: String,
     pub name: String,
@@ -311,7 +364,8 @@ pub struct App {
 /// `com.apple.disk_usage` domain (same domain as the basic [`Storage`]
 /// totals). All three categories together do not always sum to "used" — iOS
 /// keeps a small bucket of opaque system overhead that the breakdown omits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageBreakdown {
     /// `CameraUsage` — photos and videos in the user's library.
     pub camera_bytes: u64,
@@ -327,22 +381,28 @@ pub struct StorageBreakdown {
 /// on `qk card` as a descriptive line ("Spotify is your oldest"), never as a
 /// historical claim — `LSInstallDate` resets on reinstall and on iCloud
 /// restore, so it does not ground a "first ever" badge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OldestApp {
     pub bundle_id: String,
     pub display_name: String,
     pub install_date_unix: i64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceStatus {
     pub name: Option<String>,
     pub model: Option<String>,
     /// Marketing name resolved from `model` via [`model_names::friendly_name`].
     pub model_friendly: Option<String>,
-    pub ios_version: Option<String>,
+    /// Platform name for the OS line, e.g. `"iOS"` or `"Android"`. Set by the
+    /// backend so the shared dashboard renderer never hard-codes a platform.
+    /// `None` renders as `"iOS"` for backward compatibility.
+    pub os_name: Option<String>,
+    pub os_version: Option<String>,
     /// Lockdown `BuildVersion`, e.g. `22C152`.
-    pub ios_build: Option<String>,
+    pub os_build: Option<String>,
     /// Raw enclosure colour string from lockdown. Mapping to a terminal
     /// colour is the renderer's job — values may be human-readable names
     /// (e.g. `"Sierra Blue"`) or opaque on modern iOS.
@@ -392,12 +452,13 @@ pub struct DeviceStatus {
     /// `true` when at least one installed bundle id matches a known
     /// jailbreak store / launcher list. Surfaced as a flag, not a flex.
     pub jailbreak_detected: bool,
-    /// `true` when `ios_build` matches Apple's developer / public beta
+    /// `true` when `os_build` matches Apple's developer / public beta
     /// pattern (a final-letter suffix on a 5-digit middle number).
     pub is_beta_build: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Storage {
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -425,7 +486,8 @@ impl Storage {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Battery {
     pub level_percent: Option<u8>,
     pub cycle_count: Option<u32>,
@@ -443,17 +505,160 @@ pub struct Battery {
     pub adapter_description: Option<String>,
 }
 
-/// Connect to an iPhone reachable over usbmuxd. With `udid = Some(_)`
-/// targets that exact device. With `udid = None`, picks the only device
-/// connected, or — when 2+ are present — opens an interactive picker on a
-/// TTY (errors with a hint on non-TTY).
-pub async fn connect(udid: Option<&str>) -> Result<Box<dyn Device>> {
-    Ok(Box::new(real::RealDevice::connect(udid).await?))
+/// Which mobile platform a connection targets. The `Device` trait is the same
+/// for every platform; this only selects which backend [`connect`] builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Ios,
+    Android,
+}
+
+impl Platform {
+    /// Human label for dashboards, listings, and pickers. The backend already
+    /// reports this through `DeviceStatus::os_name`; this is the same word for
+    /// the contexts that only have a `Platform` in hand.
+    pub fn label(self) -> &'static str {
+        match self {
+            Platform::Ios => "iOS",
+            Platform::Android => "Android",
+        }
+    }
+}
+
+/// Connect to a device.
+///
+/// With `platform = Some(_)` the matching backend is used directly and keeps
+/// its own single-platform device selection (`udid = Some(_)` targets one,
+/// `None` picks the sole device or opens that backend's picker on a TTY).
+///
+/// With `platform = None` quokka autodetects across both transports — see
+/// [`autodetect`].
+pub async fn connect(udid: Option<&str>, platform: Option<Platform>) -> Result<Box<dyn Device>> {
+    if let Some(platform) = platform {
+        return connect_to(platform, udid).await;
+    }
+    autodetect(udid).await
+}
+
+/// Build the backend for a known platform, targeting `udid` (or the backend's
+/// sole device when `None`).
+async fn connect_to(platform: Platform, udid: Option<&str>) -> Result<Box<dyn Device>> {
+    match platform {
+        Platform::Ios => Ok(Box::new(real::RealDevice::connect(udid).await?)),
+        Platform::Android => Ok(Box::new(android::AndroidDevice::connect(udid).await?)),
+    }
+}
+
+/// Choose a platform when the user did not force one with `--platform`.
+///
+/// Enumerates both transports cheaply (udids only, best-effort: a missing
+/// `adb` or unreachable usbmuxd contributes zero devices instead of erroring),
+/// then dispatches to the matching backend. With an explicit `udid` the owning
+/// platform is resolved from the merged set. Without one, a single device
+/// anywhere is used directly; 2+ open a cross-platform picker on a TTY or
+/// error with a hint otherwise — mirroring each backend's own multi-device rule.
+async fn autodetect(udid: Option<&str>) -> Result<Box<dyn Device>> {
+    use std::io::IsTerminal;
+
+    let (ios, android) = tokio::join!(real::ios_udids(), android::online_serials());
+
+    if let Some(want) = udid {
+        if ios.iter().any(|u| u == want) {
+            return connect_to(Platform::Ios, Some(want)).await;
+        }
+        if android.iter().any(|u| u == want) {
+            return connect_to(Platform::Android, Some(want)).await;
+        }
+        return Err(anyhow!(
+            "No device with UDID `{want}` is connected. \
+             Run `qk devices` to see what's plugged in."
+        ));
+    }
+
+    let total = ios.len() + android.len();
+    if total == 0 {
+        return Err(anyhow!(
+            "No device connected. For iPhone, plug in over cable and tap 'Trust'. \
+             For Android, enable USB debugging and accept 'Allow USB debugging'."
+        ));
+    }
+    if total == 1 {
+        // Exactly one device anywhere — connect without a picker. Pass `None`
+        // so the backend selects its sole device, avoiding a stale-udid race.
+        let platform = if ios.len() == 1 {
+            Platform::Ios
+        } else {
+            Platform::Android
+        };
+        return connect_to(platform, None).await;
+    }
+    if !std::io::stderr().is_terminal() {
+        return Err(anyhow!(
+            "{total} devices connected across platforms. Pass --udid <UDID> \
+             (or set QK_UDID) to pick one. Run `qk devices` to see names + models."
+        ));
+    }
+    let chosen = pick_listing_across_platforms().await?;
+    connect_to(chosen.platform, Some(&chosen.udid)).await
+}
+
+/// Full-enumeration cross-platform picker, used when 2+ devices are connected
+/// and stderr is a TTY. Re-reads the enriched listing (names + models) so the
+/// menu is readable, unlike the cheap udid-only scan that gated us here.
+async fn pick_listing_across_platforms() -> Result<DeviceListing> {
+    let listings = list_devices().await?;
+    if listings.is_empty() {
+        return Err(anyhow!(
+            "Devices disappeared before selection — re-run the command."
+        ));
+    }
+    let idx = pick_listing(&listings, "Multiple devices connected — pick one")?
+        .ok_or_else(|| anyhow!("Aborted."))?;
+    Ok(listings[idx].clone())
+}
+
+/// Present `listings` in an interactive picker, returning the chosen index, or
+/// `None` if the user aborted. Shared by [`autodetect`] and the launcher's
+/// device switcher so both render the device rows identically. Synchronous —
+/// `dialoguer` blocks — which is fine on the interactive picker hot path.
+pub(crate) fn pick_listing(listings: &[DeviceListing], prompt: &str) -> Result<Option<usize>> {
+    let items: Vec<String> = listings.iter().map(format_listing_row).collect();
+    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .map_err(|e| anyhow!("picker failed: {e}"))
+}
+
+/// One-line label for a device in the cross-platform picker: name, platform,
+/// model, connection, udid. Mirrors the columns `qk devices` prints.
+fn format_listing_row(d: &DeviceListing) -> String {
+    let name = d
+        .name
+        .as_deref()
+        .unwrap_or("(untrusted — tap Trust / Allow)");
+    let model = d
+        .model_friendly
+        .as_deref()
+        .or(d.model_identifier.as_deref())
+        .unwrap_or("?");
+    format!(
+        "{name}  ·  {platform}  ·  {model}  ·  {conn}  ·  {udid}",
+        platform = d.platform.label(),
+        conn = d.connection,
+        udid = d.udid,
+    )
 }
 
 /// One row returned by [`list_devices`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceListing {
+    /// Which backend owns this device. Lets one merged list carry both an
+    /// iPhone over usbmuxd and an Android over adb without the caller guessing.
+    pub platform: Platform,
     pub udid: String,
     pub connection: &'static str,
     pub name: Option<String>,
@@ -461,10 +666,18 @@ pub struct DeviceListing {
     pub model_friendly: Option<String>,
 }
 
-/// List every iPhone reachable through usbmuxd. Best-effort: identity
-/// fields are `None` if the device is not paired/trusted yet.
+/// List every device reachable across both transports — iPhones over usbmuxd
+/// and Android devices over adb — in one merged set.
+///
+/// Best-effort per platform: a transport that cannot be reached (no `adb`
+/// installed, usbmuxd down) contributes zero rows rather than failing the whole
+/// listing, so an iPhone-only Mac without `adb` still lists its iPhone. Identity
+/// fields are `None` for devices that are not yet paired/trusted/authorized.
 pub async fn list_devices() -> Result<Vec<DeviceListing>> {
-    real::list_devices_impl().await
+    let (ios, android) = tokio::join!(real::list_devices_impl(), android::list_devices_impl());
+    let mut out = ios.unwrap_or_default();
+    out.extend(android.unwrap_or_default());
+    Ok(out)
 }
 
 /// In-memory [`Device`] for tests. Public so integration tests in `tests/`
@@ -533,8 +746,9 @@ impl Default for FakeDevice {
                 name: Some("Test iPhone".into()),
                 model: Some("iPhone15,3".into()),
                 model_friendly: Some("iPhone 14 Pro Max".into()),
-                ios_version: Some("18.2".into()),
-                ios_build: Some("22C152".into()),
+                os_name: Some("iOS".into()),
+                os_version: Some("18.2".into()),
+                os_build: Some("22C152".into()),
                 enclosure_color: Some("Deep Purple".into()),
                 storage: Some(Storage {
                     total_bytes: 256_000_000_000,
@@ -635,8 +849,8 @@ impl Default for FakeDevice {
                 enclosure_color: Some("Natural Titanium".into()),
                 serial: "F2LXXXXXXXXX".into(),
                 udid: "00008130-001A2B3C4D5E6F7G".into(),
-                ios_version: "18.2".into(),
-                ios_build: Some("22C152".into()),
+                os_version: "18.2".into(),
+                os_build: Some("22C152".into()),
                 hardware_model: Some("D74AP".into()),
                 cpu_architecture: Some("arm64e".into()),
                 activation_state: Some("Activated".into()),
@@ -702,6 +916,10 @@ impl Device for FakeDevice {
             .map_err(|e| anyhow!("{bundle_id}: {e}"))
     }
 
+    fn media_roots(&self) -> &'static [&'static str] {
+        IOS_MEDIA_ROOTS
+    }
+
     async fn afc_walk(&self, _roots: &[&str], on_progress: WalkCallback) -> Result<Vec<MediaFile>> {
         let files = self.media.clone();
         let bytes_seen = files.iter().map(|f| f.size_bytes).sum();
@@ -753,6 +971,13 @@ impl Device for FakeDevice {
         Ok(rx)
     }
 
+    fn as_capture(&self) -> Option<&dyn CaptureCapable> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl CaptureCapable for FakeDevice {
     async fn capture_packets(&self) -> Result<PacketStream> {
         use std::sync::atomic::Ordering;
         use tokio::sync::mpsc::error::TrySendError;
@@ -992,6 +1217,7 @@ mod real {
         let mut out = Vec::with_capacity(devs.len());
         for (d, (name, model_identifier, model_friendly)) in devs.iter().zip(identities) {
             out.push(DeviceListing {
+                platform: Platform::Ios,
                 udid: d.udid.clone(),
                 connection: if d.connection_type == Connection::Usb {
                     "USB"
@@ -1004,6 +1230,26 @@ mod real {
             });
         }
         Ok(out)
+    }
+
+    /// Cheap udid-only scan of every iPhone usbmuxd knows about, deduplicated
+    /// across transports (the same device on USB and Wi-Fi shares one udid).
+    /// Best-effort: an unreachable usbmuxd yields an empty list, never an error,
+    /// so [`super::autodetect`] can count devices without aborting the command.
+    pub(super) async fn ios_udids() -> Vec<String> {
+        let Ok(mut usbmuxd) = UsbmuxdConnection::default().await else {
+            return Vec::new();
+        };
+        let Ok(devs) = usbmuxd.get_devices().await else {
+            return Vec::new();
+        };
+        let mut udids: Vec<String> = Vec::new();
+        for d in devs {
+            if !udids.contains(&d.udid) {
+                udids.push(d.udid);
+            }
+        }
+        udids
     }
 
     impl RealDevice {
@@ -1037,7 +1283,7 @@ mod real {
                 .and_then(super::chip_names::chip_name)
                 .map(str::to_string);
             let is_beta_build = info
-                .ios_build
+                .os_build
                 .as_deref()
                 .is_some_and(super::build_version::is_beta);
             let battery = Battery {
@@ -1055,8 +1301,9 @@ mod real {
                 name: info.name,
                 model: info.model,
                 model_friendly,
-                ios_version: info.ios_version,
-                ios_build: info.ios_build,
+                os_name: Some("iOS".into()),
+                os_version: info.os_version,
+                os_build: info.os_build,
                 enclosure_color: info.enclosure_color,
                 storage: info.storage,
                 battery,
@@ -1121,6 +1368,10 @@ mod real {
             ip.uninstall(bundle_id.to_string(), None)
                 .await
                 .map_err(|e| anyhow!("uninstall {bundle_id} failed: {e:?}"))
+        }
+
+        fn media_roots(&self) -> &'static [&'static str] {
+            IOS_MEDIA_ROOTS
         }
 
         async fn afc_walk(
@@ -1228,6 +1479,13 @@ mod real {
             Ok(rx)
         }
 
+        fn as_capture(&self) -> Option<&dyn CaptureCapable> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl CaptureCapable for RealDevice {
         async fn capture_packets(&self) -> Result<PacketStream> {
             use std::sync::atomic::Ordering;
             use tokio::sync::mpsc::error::TrySendError;
@@ -1313,7 +1571,7 @@ mod real {
         let udid = read_string(&mut lock, "UniqueDeviceID", None)
             .await
             .ok_or_else(|| anyhow!("Could not read device identity (failed on: UniqueDeviceID)"))?;
-        let ios_version = read_string(&mut lock, "ProductVersion", None)
+        let os_version = read_string(&mut lock, "ProductVersion", None)
             .await
             .ok_or_else(|| anyhow!("Could not read device identity (failed on: ProductVersion)"))?;
 
@@ -1331,8 +1589,8 @@ mod real {
             },
             serial,
             udid,
-            ios_version,
-            ios_build: read_string(&mut lock, "BuildVersion", None).await,
+            os_version,
+            os_build: read_string(&mut lock, "BuildVersion", None).await,
             hardware_model: read_string(&mut lock, "HardwareModel", None).await,
             cpu_architecture: read_string(&mut lock, "CPUArchitecture", None).await,
             activation_state: read_string(&mut lock, "ActivationState", None).await,
@@ -1655,8 +1913,8 @@ mod real {
     pub(super) struct LockdownInfo {
         pub name: Option<String>,
         pub model: Option<String>,
-        pub ios_version: Option<String>,
-        pub ios_build: Option<String>,
+        pub os_version: Option<String>,
+        pub os_build: Option<String>,
         pub enclosure_color: Option<String>,
         pub hardware_platform: Option<String>,
         pub storage: Option<Storage>,
@@ -1683,8 +1941,8 @@ mod real {
 
             let name = read_string(&mut lock, "DeviceName", None).await;
             let model = read_string(&mut lock, "ProductType", None).await;
-            let ios_version = read_string(&mut lock, "ProductVersion", None).await;
-            let ios_build = read_string(&mut lock, "BuildVersion", None).await;
+            let os_version = read_string(&mut lock, "ProductVersion", None).await;
+            let os_build = read_string(&mut lock, "BuildVersion", None).await;
             // `DeviceEnclosureColor` is the modern key; on older devices Apple
             // exposed `DeviceColor` instead — fall back so the colour mapping
             // has a chance on iPhone XS / XR vintages.
@@ -1728,8 +1986,8 @@ mod real {
             Ok(LockdownInfo {
                 name,
                 model,
-                ios_version,
-                ios_build,
+                os_version,
+                os_build,
                 enclosure_color,
                 hardware_platform,
                 storage,
@@ -1982,7 +2240,7 @@ mod tests {
         let fake = FakeDevice::default();
         let status = fake.status().await.unwrap();
         assert_eq!(status.name.as_deref(), Some("Test iPhone"));
-        assert_eq!(status.ios_version.as_deref(), Some("18.2"));
+        assert_eq!(status.os_version.as_deref(), Some("18.2"));
         assert!(status.storage.is_some());
         assert_eq!(status.battery.level_percent, Some(87));
     }
@@ -2004,6 +2262,85 @@ mod tests {
         let fake = FakeDevice::with_status_error("device not trusted");
         let err = fake.status().await.unwrap_err();
         assert!(err.to_string().contains("device not trusted"));
+    }
+
+    /// Serialize → deserialize → serialize must be a fixed point. This pins the
+    /// IPC contract the GUI depends on: a field that silently stops
+    /// round-tripping (e.g. a type that loses `Serialize`/`Deserialize`) fails
+    /// here instead of at the Tauri boundary. Re-serializing and comparing the
+    /// JSON avoids needing `PartialEq` on every DTO.
+    fn assert_serde_round_trips<T>(value: &T)
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        let json = serde_json::to_string(value).expect("serialize");
+        let back: T = serde_json::from_str(&json).expect("deserialize");
+        let json_again = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(json, json_again, "round-trip changed the payload");
+    }
+
+    #[test]
+    fn device_status_serde_round_trips() {
+        let status = FakeDevice::default().status.expect("seed status is Ok");
+        assert_serde_round_trips(&status);
+    }
+
+    #[test]
+    fn device_info_serde_round_trips() {
+        assert_serde_round_trips(&FakeDevice::default().info);
+    }
+
+    #[test]
+    fn app_and_media_serde_round_trip() {
+        let fake = FakeDevice::default();
+        let app = fake.apps.expect("seed apps is Ok").remove(0);
+        assert_serde_round_trips(&app);
+        assert_serde_round_trips(&fake.media[0]);
+    }
+
+    #[test]
+    fn log_entry_and_packet_serde_round_trip() {
+        let entry = LogEntry {
+            timestamp_unix_ms: Some(1_700_000_000_000),
+            time_text: Some("12:34:56".into()),
+            host: "iPhone".into(),
+            process: "SpringBoard".into(),
+            pid: Some(42),
+            level: LogLevel::Warning,
+            message: "low memory".into(),
+        };
+        assert_serde_round_trips(&entry);
+
+        let packet = Packet {
+            pid: 42,
+            comm: "mDNSResponder".into(),
+            epid: 1,
+            ecomm: "networkd".into(),
+            interface: "en0".into(),
+            seconds: 1_700_000_000,
+            microseconds: 123_456,
+            io: 1,
+            data: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        assert_serde_round_trips(&packet);
+    }
+
+    #[test]
+    fn dto_keys_are_camel_case() {
+        // Locks the `rename_all = "camelCase"` contract the JS frontend reads.
+        // Dropping the attribute would leak snake_case keys across the IPC
+        // boundary; this fails loudly if that happens.
+        let app = App {
+            bundle_id: "com.example.app".into(),
+            name: "Example".into(),
+            size_bytes: 123,
+            is_system: false,
+            install_date_unix: None,
+        };
+        let json = serde_json::to_string(&app).expect("serialize");
+        assert!(json.contains("\"sizeBytes\""), "expected camelCase key");
+        assert!(json.contains("\"bundleId\""), "expected camelCase key");
+        assert!(!json.contains("size_bytes"), "snake_case key leaked");
     }
 
     #[test]

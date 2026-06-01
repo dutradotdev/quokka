@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::device::{Device, Packet, PacketStream};
 
@@ -183,11 +183,19 @@ pub async fn run(device: &dyn Device, opts: Options) -> Result<()> {
     // so the smoke-test and pipeline cases keep working without an
     // interactive shell.
     let tty = crate::ui::stdout_is_interactive();
+
+    // Packet capture is iOS-only. Resolve the capability once, up front, so the
+    // TUI and line-renderer paths share a single clear error when the device
+    // can't capture (e.g. a non-iOS backend).
+    let cap = device.as_capture().ok_or_else(|| {
+        anyhow!("packet capture is only available for iPhone devices (it uses com.apple.pcapd)")
+    })?;
+
     if tty && matches!(opts.mode, Mode::Stream | Mode::Hosts) {
-        return tui::run(device, opts).await;
+        return tui::run(cap, opts).await;
     }
 
-    let stream = device.capture_packets().await?;
+    let stream = cap.capture_packets().await?;
     let mut writer = match &opts.save {
         Some(path) => Some(
             CaptureFile::open(path)

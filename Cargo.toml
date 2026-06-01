@@ -40,6 +40,9 @@ path = "src/bin/qk.rs"
 default = []
 # Enables tests that require a real iPhone connected via USB. Not run in CI.
 e2e = []
+# Enables tests that require a real Android device over adb. Not run in CI
+# (CI only compile-checks it, same as `e2e`).
+e2e-android = []
 
 [dependencies]
 # Pinned with `=` — the idevice crate warns of breaking changes at every point
@@ -56,6 +59,13 @@ idevice = { version = "=0.1.61", default-features = false, features = [
     "pcapd",
     "rsd",
 ] }
+
+# Android transport: talks the adb protocol to a local adb server on
+# 127.0.0.1:5037. Pinned with `=` for the same reason as `idevice` — a
+# fast-moving pre-/early-1.0-style surface we want to absorb deliberately.
+# `default-features = false` keeps `usb` (rusb/libusb, a C dep) and `mdns` off:
+# server mode is pure-Rust and needs neither.
+adb_client = { version = "=3.2.1", default-features = false }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -84,6 +94,11 @@ dialoguer = { version = "0.11", default-features = false }
 # sizes immediately, then refresh as Phase 2 enrichment streams in.
 ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
+# Redirect the process stderr fd to /dev/null while the multi-device sidebar
+# owns the alt screen, so best-effort `eprintln!` warnings from the device layer
+# (AFC skips, enrichment failures) can't scribble over the ratatui frame. Only
+# `dup`/`dup2`/`open` on our own stderr — no other libc surface is used.
+libc = "0.2"
 # Pure-Rust packet parser (Ethernet / IPv4 / IPv6 / TCP / UDP / ICMP). No C deps.
 etherparse = "0.20"
 # pcap / pcapng read+write. We use the write side (`--save`) — pcapng lets us

@@ -141,10 +141,13 @@ fn render_identity(status: &DeviceStatus) -> String {
 }
 
 fn render_os_line(status: &DeviceStatus) -> String {
-    let version = format_optional(status.ios_version.as_deref());
-    let mut line = match status.ios_build.as_deref() {
-        Some(b) => format!("iOS {version} ({})", format!("build {b}").dimmed()),
-        None => format!("iOS {version}"),
+    // The platform name is device-provided so this shared renderer stays
+    // platform-neutral; `None` defaults to iOS, the original sole platform.
+    let os = status.os_name.as_deref().unwrap_or("iOS");
+    let version = format_optional(status.os_version.as_deref());
+    let mut line = match status.os_build.as_deref() {
+        Some(b) => format!("{os} {version} ({})", format!("build {b}").dimmed()),
+        None => format!("{os} {version}"),
     };
     // Locale and time zone only join the OS line when both are known —
     // a lone locale without a region reads as noise.
@@ -395,8 +398,9 @@ mod tests {
             name: Some("Lucas's iPhone".into()),
             model: Some("iPhone15,3".into()),
             model_friendly: Some("iPhone 14 Pro Max".into()),
-            ios_version: Some("18.2".into()),
-            ios_build: Some("22C152".into()),
+            os_name: Some("iOS".into()),
+            os_version: Some("18.2".into()),
+            os_build: Some("22C152".into()),
             enclosure_color: Some("Deep Purple".into()),
             storage: Some(Storage {
                 total_bytes: 256_000_000_000,
@@ -479,10 +483,22 @@ mod tests {
     #[test]
     fn missing_build_drops_build_suffix() {
         let mut s = healthy();
-        s.ios_build = None;
+        s.os_build = None;
         let out = render(&s, 100, NOW_UNIX);
         assert!(out.contains("iOS 18.2"));
         assert!(!out.contains("build"));
+    }
+
+    #[test]
+    fn os_line_uses_device_provided_platform_name() {
+        // The renderer must not hard-code "iOS" — an Android backend reports
+        // its own platform name through `os_name`.
+        let mut s = healthy();
+        s.os_name = Some("Android".into());
+        s.os_version = Some("12".into());
+        let out = render(&s, 100, NOW_UNIX);
+        assert!(out.contains("Android 12"));
+        assert!(!out.contains("iOS"));
     }
 
     #[test]

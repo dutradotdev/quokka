@@ -54,15 +54,32 @@ impl From<LogLevelArg> for LogLevel {
     }
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum PlatformArg {
+    Ios,
+    Android,
+}
+
+impl From<PlatformArg> for crate::device::Platform {
+    fn from(v: PlatformArg) -> Self {
+        match v {
+            PlatformArg::Ios => crate::device::Platform::Ios,
+            PlatformArg::Android => crate::device::Platform::Android,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "quokka",
     bin_name = "quokka",
-    about = "Inspect and tidy an iPhone connected to your Mac over USB.",
-    long_about = "Inspect and tidy an iPhone connected to your Mac over USB.\n\
+    about = "Inspect and tidy an iPhone or Android device connected to your Mac over USB.",
+    long_about = "Inspect and tidy an iPhone or Android device connected to your Mac over USB.\n\
 \n\
-Run without a subcommand on a TTY to open the interactive launcher. \
-The `qk` binary is a short alias for `quokka` and behaves identically.",
+iPhones are reached over usbmuxd, Android devices over adb; the platform is \
+autodetected (force it with --platform). Run without a subcommand on a TTY to \
+open the interactive launcher. The `qk` binary is a short alias for `quokka` \
+and behaves identically.",
     version,
     propagate_version = true
 )]
@@ -71,6 +88,11 @@ struct Cli {
     /// in a non-interactive shell. Reads from `QK_UDID` env if unset.
     #[arg(long, global = true, env = "QK_UDID")]
     udid: Option<String>,
+
+    /// Force the target platform instead of autodetecting across a USB iPhone
+    /// and an `adb`-reachable Android device. Reads from `QK_PLATFORM` if unset.
+    #[arg(long, global = true, env = "QK_PLATFORM", value_enum)]
+    platform: Option<PlatformArg>,
 
     /// Emit machine-readable JSON instead of the human dashboard. Currently
     /// honored by `info` and `devices`; other subcommands ignore it.
@@ -262,11 +284,18 @@ pub async fn run() -> Result<()> {
         return commands::update::run(check, yes).await;
     }
 
-    let device = device::connect(cli.udid.as_deref()).await?;
+    // The bare launcher owns its own device selection — it lets the user switch
+    // between connected devices without restarting — so it connects internally
+    // rather than through the single shared connection the subcommands use.
+    if cli.command.is_none() {
+        return commands::menu::run_launcher(cli.udid.as_deref(), cli.platform.map(Into::into))
+            .await;
+    }
+
+    let device = device::connect(cli.udid.as_deref(), cli.platform.map(Into::into)).await?;
 
     match cli.command {
-        None => commands::menu::run(&*device).await,
-        Some(Command::Devices) | Some(Command::Update { .. }) => {
+        None | Some(Command::Devices) | Some(Command::Update { .. }) => {
             // Already handled above; keeping the arm satisfies the
             // exhaustiveness check without an unreachable!().
             Ok(())
@@ -427,6 +456,31 @@ mod cli_tests {
         );
         let env = arg.get_env().expect("--udid must read from env");
         assert_eq!(env, "QK_UDID");
+    }
+
+    #[test]
+    fn platform_flag_is_global_reads_env_and_defaults_none() {
+        // Default: no --platform means autodetect (None today → iOS).
+        assert!(parse(&["status"]).platform.is_none());
+        // Explicit value parses into the arg enum.
+        assert!(matches!(
+            parse(&["--platform", "android", "status"]).platform,
+            Some(PlatformArg::Android)
+        ));
+        assert!(matches!(
+            parse(&["--platform", "ios", "status"]).platform,
+            Some(PlatformArg::Ios)
+        ));
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "platform")
+            .expect("platform arg should exist");
+        assert!(arg.is_global_set(), "--platform must remain global");
+        let env = arg.get_env().expect("--platform must read from env");
+        assert_eq!(env, "QK_PLATFORM");
+        // Unknown platforms must be rejected by the value enum.
+        assert!(Cli::try_parse_from(["quokka", "--platform", "windows", "status"]).is_err());
     }
 
     #[test]
