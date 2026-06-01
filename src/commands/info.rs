@@ -10,55 +10,18 @@ use crate::ui::spinner;
 
 const LABEL_WIDTH: usize = 18;
 
-pub async fn run(device: &dyn Device, redact: bool, json: bool) -> Result<()> {
+pub async fn run(device: &dyn Device, redact: bool) -> Result<()> {
     let bar = spinner("Reading device info...");
-    let info = device.info().await;
+    // Fetch the raw identity; the human renderer applies the display masking
+    // when `redact` is set. (The `--json` path masks via `app::info` instead,
+    // in `lib.rs`.)
+    let info = crate::app::info(device, false).await;
     bar.finish_and_clear();
     let info = info?;
 
     let mut out = anstream::stdout();
-    if json {
-        write!(out, "{}", render_json(&info, redact))?;
-    } else {
-        write!(out, "{}", render(&info, redact))?;
-    }
+    write!(out, "{}", render(&info, redact))?;
     Ok(())
-}
-
-/// JSON serialisation of [`DeviceInfo`]. Honors `--redact` exactly like the
-/// human renderer — the masked form is what lands in the JSON too.
-pub fn render_json(info: &DeviceInfo, redact: bool) -> String {
-    let mask = |v: &str| maybe_redact(v, redact);
-    let v = serde_json::json!({
-        "device": {
-            "name": info.name,
-            "model_identifier": info.model_identifier,
-            "model_friendly": info.model_friendly,
-            "model_number": info.model_number,
-            "region_info": info.region_info,
-            "enclosure_color": info.enclosure_color,
-            "serial": mask(&info.serial),
-            "udid": mask(&info.udid),
-        },
-        "system": {
-            "ios_version": info.os_version,
-            "ios_build": info.os_build,
-            "hardware_model": info.hardware_model,
-            "cpu_architecture": info.cpu_architecture,
-            "activation_state": info.activation_state,
-            "is_supervised": info.is_supervised,
-            "developer_mode_enabled": info.developer_mode_enabled,
-        },
-        "network": {
-            "wifi_address": info.wifi_address.as_deref().map(mask),
-            "bluetooth_address": info.bluetooth_address.as_deref().map(mask),
-            "imei": info.imei.as_deref().map(mask),
-            "imei2": info.imei2.as_deref().map(mask),
-        },
-    });
-    let mut s = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string());
-    s.push('\n');
-    s
 }
 
 pub fn render(info: &DeviceInfo, redact: bool) -> String {

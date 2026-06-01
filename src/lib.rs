@@ -95,8 +95,10 @@ struct Cli {
     #[arg(long, global = true, env = "QK_PLATFORM", value_enum)]
     platform: Option<PlatformArg>,
 
-    /// Emit machine-readable JSON instead of the human dashboard. Currently
-    /// honored by `info` and `devices`; other subcommands ignore it.
+    /// Emit machine-readable JSON instead of human output. Honored by
+    /// `status`, `info`, `apps`, `analyze`, `media`, and `devices` (one JSON
+    /// document); `logs` streams NDJSON (one object per entry). Rejected with
+    /// an error on commands that don't support it (e.g. `card`, `capture`).
     #[arg(long, global = true)]
     json: bool,
 
@@ -253,19 +255,44 @@ enum Command {
     },
 }
 
-/// `--json` is only wired into `info` and `devices`. Every other command
-/// would parse the global flag and silently ignore it, so we reject it up
-/// front rather than producing human output that looks like the flag did
-/// nothing.
+/// Which subcommands honor `--json`. Every other command would parse the
+/// global flag and silently ignore it, so we reject it up front rather than
+/// producing human output that looks like the flag did nothing. `card` is an
+/// image command and `capture`'s aggregation modes stay text-only, so neither
+/// opts in here.
 fn command_supports_json(command: Option<&Command>) -> bool {
-    matches!(command, Some(Command::Info { .. }) | Some(Command::Devices))
+    matches!(
+        command,
+        Some(Command::Status)
+            | Some(Command::Info { .. })
+            | Some(Command::Apps { .. })
+            | Some(Command::Analyze { .. })
+            | Some(Command::Media { .. })
+            | Some(Command::Logs { .. })
+            | Some(Command::Devices)
+    )
+}
+
+/// Serialize a DTO as pretty JSON to stdout. The single sink for every
+/// `--json` one-shot, so the output format stays uniform across commands.
+fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    use std::io::Write;
+    let mut out = anstream::stdout();
+    writeln!(out, "{}", serde_json::to_string_pretty(value)?)?;
+    Ok(())
+}
+
+/// A progress callback that discards its updates — used by the `--json` paths,
+/// which stream no spinner.
+fn silent_walk() -> crate::device::WalkCallback {
+    Box::new(|_p: crate::device::WalkProgress| {})
 }
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.json && !command_supports_json(cli.command.as_ref()) {
-        bail!("--json is only supported by `info` and `devices`");
+        bail!("--json is not supported by this command");
     }
 
     // No subcommand + non-TTY (pipe/CI): the interactive launcher would be
@@ -301,21 +328,50 @@ pub async fn run() -> Result<()> {
             // exhaustiveness check without an unreachable!().
             Ok(())
         }
-        Some(Command::Status) => commands::status::run(&*device).await,
+        Some(Command::Status) => {
+            if cli.json {
+                print_json(&crate::app::status(&*device).await?)
+            } else {
+                commands::status::run(&*device).await
+            }
+        }
         Some(Command::Apps { uninstall, yes }) => {
-            commands::apps::run(
-                &*device,
-                commands::apps::Options {
-                    uninstall,
-                    assume_yes: yes,
-                },
-            )
-            .await
+            // `--json` serializes the app listing; with `--uninstall` the
+            // command is an action, not a query, so it keeps its normal path.
+            if cli.json && uninstall.is_none() {
+                let apps =
+                    crate::app::apps(&*device, Box::new(|_u: crate::device::BatchUpdate| {}))
+                        .await?;
+                print_json(&apps)
+            } else {
+                commands::apps::run(
+                    &*device,
+                    commands::apps::Options {
+                        uninstall,
+                        assume_yes: yes,
+                    },
+                )
+                .await
+            }
         }
         Some(Command::Analyze { top, delete }) => {
-            commands::analyze::run(&*device, top, delete).await
+            // `--delete` is interactive/destructive, so it never takes the
+            // JSON path even when `--json` is also passed.
+            if cli.json && !delete {
+                let report =
+                    crate::app::analyze(&*device, crate::ui::now_unix(), silent_walk()).await?;
+                print_json(&report)
+            } else {
+                commands::analyze::run(&*device, top, delete).await
+            }
         }
-        Some(Command::Info { redact }) => commands::info::run(&*device, redact, cli.json).await,
+        Some(Command::Info { redact }) => {
+            if cli.json {
+                print_json(&crate::app::info(&*device, redact).await?)
+            } else {
+                commands::info::run(&*device, redact).await
+            }
+        }
         Some(Command::Card {
             output,
             no_open,
@@ -348,7 +404,12 @@ pub async fn run() -> Result<()> {
             commands::power::run(&*device, commands::power::Action::Shutdown, yes).await
         }
         Some(Command::Media { find_duplicates }) => {
-            commands::media::run(&*device, find_duplicates).await
+            if cli.json {
+                let report = crate::app::media(&*device, find_duplicates, silent_walk()).await?;
+                print_json(&report)
+            } else {
+                commands::media::run(&*device, find_duplicates).await
+            }
         }
         Some(Command::Capture {
             max,
@@ -403,6 +464,7 @@ pub async fn run() -> Result<()> {
                     min_level: min_level.into(),
                     process_filter: process,
                     save_path: save,
+                    json: cli.json,
                 },
             )
             .await

@@ -106,7 +106,7 @@ pub async fn run(device: &dyn Device, action: DeviceAction) -> Result<()> {
         DeviceAction::Media => media::run(device, false).await,
         DeviceAction::Logs => logs::run(device, logs::Options::default()).await,
         DeviceAction::Capture => capture::run(device, capture::Options::default()).await,
-        DeviceAction::Info => info::run(device, false, false).await,
+        DeviceAction::Info => info::run(device, false).await,
         DeviceAction::Card => {
             card::run(
                 device,

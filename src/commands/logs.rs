@@ -19,6 +19,9 @@ pub struct Options {
     pub min_level: LogLevel,
     pub process_filter: Option<String>,
     pub save_path: Option<PathBuf>,
+    /// Emit one JSON object per entry (NDJSON) instead of the human line.
+    /// Implies plain mode — the TUI is never used with `--json`.
+    pub json: bool,
 }
 
 impl Default for Options {
@@ -28,13 +31,15 @@ impl Default for Options {
             min_level: DEFAULT_MIN_LEVEL,
             process_filter: None,
             save_path: None,
+            json: false,
         }
     }
 }
 
 pub async fn run(device: &dyn Device, opts: Options) -> Result<()> {
-    let rx = device.stream_logs().await?;
-    let plain_mode = opts.no_tui || !crate::ui::stdout_is_interactive();
+    let rx = crate::app::stream_logs(device).await?;
+    // `--json` always streams plain NDJSON, never the TUI.
+    let plain_mode = opts.json || opts.no_tui || !crate::ui::stdout_is_interactive();
     if plain_mode {
         plain::run(rx, opts).await
     } else {
@@ -230,6 +235,7 @@ pub(crate) mod plain {
         mut rx: tokio::sync::mpsc::Receiver<Result<LogEntry>>,
         opts: Options,
     ) -> Result<()> {
+        let json = opts.json;
         let filter = Filter {
             min_level: opts.min_level,
             process: opts.process_filter,
@@ -252,9 +258,19 @@ pub(crate) mod plain {
                     if !matches_filter(&entry, &filter) {
                         continue;
                     }
-                    let line = format_plain(&entry);
-                    let colored = colorize(&line, entry.level);
-                    writeln!(out, "{colored}")?;
+                    // `--json` emits one JSON object per entry (NDJSON), with no
+                    // colour; the save file mirrors whatever stdout receives.
+                    let line = if json {
+                        serde_json::to_string(&entry).unwrap_or_default()
+                    } else {
+                        format_plain(&entry)
+                    };
+                    let rendered = if json {
+                        line.clone()
+                    } else {
+                        colorize(&line, entry.level)
+                    };
+                    writeln!(out, "{rendered}")?;
                     if let Some(f) = save_file.as_mut() {
                         f.write_all(line.as_bytes()).await?;
                         f.write_all(b"\n").await?;
@@ -1313,6 +1329,7 @@ mod tests {
             min_level: LogLevel::Warning,
             process_filter: Some("springboard".into()),
             save_path: Some(path.clone()),
+            json: false,
         };
         plain::run(rx, opts)
             .await
@@ -1350,10 +1367,60 @@ mod tests {
                 min_level: LogLevel::Debug,
                 process_filter: None,
                 save_path: None,
+                json: false,
             },
         )
         .await
         .expect("plain run with no save should succeed");
+    }
+
+    #[tokio::test]
+    async fn plain_mode_json_emits_one_json_object_per_entry() {
+        // `--json` contract: NDJSON, one parseable JSON object per passing
+        // entry. We capture via the save file, which mirrors stdout exactly.
+        use std::io::Read;
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<LogEntry>>(8);
+        tx.send(Ok(entry("SpringBoard", LogLevel::Warning)))
+            .await
+            .unwrap();
+        tx.send(Ok(entry("mediaserverd", LogLevel::Error)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let path = std::env::temp_dir().join(format!(
+            "quokka-logs-json-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let opts = Options {
+            no_tui: true,
+            min_level: LogLevel::Debug,
+            process_filter: None,
+            save_path: Some(path.clone()),
+            json: true,
+        };
+        plain::run(rx, opts).await.expect("plain json run ok");
+
+        let mut content = String::new();
+        std::fs::File::open(&path)
+            .expect("save file should exist")
+            .read_to_string(&mut content)
+            .unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "one NDJSON line per entry");
+        for line in lines {
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("each line must be valid JSON");
+            assert!(v.get("process").is_some());
+            assert!(v.get("level").is_some());
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

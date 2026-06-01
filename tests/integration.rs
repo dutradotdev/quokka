@@ -353,9 +353,7 @@ async fn analyze_top_larger_than_files_saturates_through_run() {
 #[tokio::test]
 async fn info_command_runs_against_fake_default() {
     let fake = FakeDevice::default();
-    commands::info::run(&fake, false, false)
-        .await
-        .expect("info ok");
+    commands::info::run(&fake, false).await.expect("info ok");
 }
 
 /// Snapshot of the plain `render_network_block` output. Locks layout so a
@@ -376,42 +374,52 @@ async fn info_network_block_layout_snapshot() {
     ");
 }
 
-/// Snapshot of the JSON output of `qk info --json`. Locks both shape and
-/// key ordering so downstream scripts can rely on the format.
+/// Snapshot of `qk info --json`. As of Phase 2 the JSON is the flat
+/// `DeviceInfo` DTO with camelCase keys (the same payload the GUI consumes),
+/// produced by `app::info`. Locks the shape and key ordering so downstream
+/// scripts can rely on the format.
 #[tokio::test]
 async fn info_json_output_snapshot() {
     let fake = FakeDevice::default();
-    let info = fake.info().await.unwrap();
-    let json = quokka_cli::commands::info::render_json(&info, false);
+    let info = quokka_cli::app::info(&fake, false).await.expect("info ok");
+    let json = serde_json::to_string_pretty(&info).expect("serialize");
     insta::assert_snapshot!(json, @r#"
     {
-      "device": {
-        "enclosure_color": "Natural Titanium",
-        "model_friendly": "iPhone 15 Pro Max",
-        "model_identifier": "iPhone16,2",
-        "model_number": "MQ8X3LL/A",
-        "name": "Lucas's iPhone",
-        "region_info": "LL/A",
-        "serial": "F2LXXXXXXXXX",
-        "udid": "00008130-001A2B3C4D5E6F7G"
-      },
-      "network": {
-        "bluetooth_address": "AA:BB:CC:DD:EE:F0",
-        "imei": "350123456789012",
-        "imei2": "350123456789013",
-        "wifi_address": "AA:BB:CC:DD:EE:FF"
-      },
-      "system": {
-        "activation_state": "Activated",
-        "cpu_architecture": "arm64e",
-        "developer_mode_enabled": false,
-        "hardware_model": "D74AP",
-        "ios_build": "22C152",
-        "ios_version": "18.2",
-        "is_supervised": false
-      }
+      "name": "Lucas's iPhone",
+      "modelIdentifier": "iPhone16,2",
+      "modelFriendly": "iPhone 15 Pro Max",
+      "modelNumber": "MQ8X3LL/A",
+      "regionInfo": "LL/A",
+      "enclosureColor": "Natural Titanium",
+      "serial": "F2LXXXXXXXXX",
+      "udid": "00008130-001A2B3C4D5E6F7G",
+      "osVersion": "18.2",
+      "osBuild": "22C152",
+      "hardwareModel": "D74AP",
+      "cpuArchitecture": "arm64e",
+      "activationState": "Activated",
+      "isSupervised": false,
+      "developerModeEnabled": false,
+      "wifiAddress": "AA:BB:CC:DD:EE:FF",
+      "bluetoothAddress": "AA:BB:CC:DD:EE:F0",
+      "imei": "350123456789012",
+      "imei2": "350123456789013"
     }
     "#);
+}
+
+/// `qk info --json --redact` masks PII in the same DTO shape.
+#[tokio::test]
+async fn info_json_redacts_pii() {
+    let fake = FakeDevice::default();
+    let masked = quokka_cli::app::info(&fake, true).await.expect("info ok");
+    let v = serde_json::to_value(&masked).expect("serialize");
+    assert!(v["serial"].as_str().unwrap().starts_with("***…"));
+    assert!(v["udid"].as_str().unwrap().starts_with("***…"));
+    assert!(v["imei"].as_str().unwrap().starts_with("***…"));
+    // Non-PII stays readable.
+    assert_eq!(v["name"], "Lucas's iPhone");
+    assert_eq!(v["modelFriendly"], "iPhone 15 Pro Max");
 }
 
 #[tokio::test]
