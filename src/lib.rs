@@ -460,7 +460,7 @@ mod cli_tests {
 
     #[test]
     fn platform_flag_is_global_reads_env_and_defaults_none() {
-        // Default: no --platform means autodetect (None today → iOS).
+        // Default: no --platform means autodetect across iOS + Android.
         assert!(parse(&["status"]).platform.is_none());
         // Explicit value parses into the arg enum.
         assert!(matches!(
