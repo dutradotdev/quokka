@@ -1,0 +1,27 @@
+# Real-device E2E cases for `qk info` (QA strategy, layer 5).
+
+- id: info-plain-prints-device-block
+  description: info prints a device identity block.
+  command: qk info
+  requires: [any]
+  verify:
+    - exit_code: 0
+    - output_matches: "Device"
+
+- id: info-json-is-well-formed
+  description: --json emits parseable JSON carrying the device udid.
+  command: qk info --json
+  requires: [any]
+  verify:
+    - exit_code: 0
+    - json_valid: true
+    - output_matches: "\"udid\""
+
+- id: info-redact-masks-identifiers
+  description: --redact must not print a full serial/udid in the clear.
+  command: qk info --redact
+  requires: [any]
+  verify:
+    - exit_code: 0
+    # Advisory: confirm masking visually in the report; the deterministic
+    # masking logic itself is covered by unit tests in commands/info.rs.

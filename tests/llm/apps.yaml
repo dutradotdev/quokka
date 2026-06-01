@@ -1,0 +1,22 @@
+# Real-device E2E cases for `qk apps` (QA strategy, layer 5).
+# Interactive: the ratatui picker takes over the screen. `interact` drives it
+# with keystrokes; `verify.frame_matches` runs against the frame captured at
+# the end of the interact block, before the final quit key.
+
+- id: apps-picker-opens-lists-and-quits
+  description: >
+    The apps picker opens, lists user apps with computed sizes, navigates,
+    and quits cleanly on `q`. This is the interactive flow QK_NON_INTERACTIVE
+    skips entirely in CI.
+  command: qk apps
+  requires: [any]
+  interact:
+    # Footer text only the rendered TUI shows — never the echoed command line,
+    # so it is a safe readiness signal (avoids the command-echo false match).
+    - wait_for: "space toggle"
+    - keys: ["Down", "Down", "Down"]
+  verify:
+    # Sizes are rendered in human units — proves Phase 2 enrichment streamed in.
+    - frame_matches: "([0-9]+\\.[0-9]+ (GB|MB|KB))|([0-9]+ B)"
+    - frame_matches: "bundle"
+  quit_keys: ["q"]

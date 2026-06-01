@@ -81,3 +81,54 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources
+
+  # Coverage ratchet (QA strategy, layer-0 gate): new code must come with
+  # tests. On a pull request, head line coverage may not drop below the base
+  # branch — a no-regression "ratchet", not an arbitrary fixed floor, so the
+  # legacy tree never needs a one-shot backfill. Self-contained (no external
+  # coverage SaaS) to keep the supply chain as tight as the audit job does.
+  # Runs on macOS to match the test job (the suite talks to usbmuxd/adb shims).
+  coverage:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    # llvm-cov injects its own instrumentation RUSTFLAGS; clear the workflow's
+    # `-D warnings` here so the two don't fight (llvm-cov warns when RUSTFLAGS
+    # is already set).
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base commit for the ratchet comparison
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure head coverage
+        id: head
+        run: |
+          pct=$(cargo llvm-cov --all-targets --summary-only --json \
+            | jq '.data[0].totals.lines.percent')
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
+          echo "Head line coverage: ${pct}%"
+
+      - name: Measure base coverage
+        id: base
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          pct=$(cargo llvm-cov --all-targets --summary-only --json \
+            | jq '.data[0].totals.lines.percent')
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
+          echo "Base line coverage: ${pct}%"
+
+      - name: Enforce ratchet
+        run: |
+          awk -v h='${{ steps.head.outputs.pct }}' -v b='${{ steps.base.outputs.pct }}' 'BEGIN {
+            if (h + 0.1 < b) {
+              printf("FAIL: coverage regressed — head %.2f%% < base %.2f%%\n", h, b)
+              exit 1
+            }
+            printf("OK: head %.2f%% >= base %.2f%% (0.1%% tolerance)\n", h, b)
+          }'

@@ -354,3 +354,234 @@ pub fn extract_sni(payload: &[u8]) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Build a `Packet` whose `data` is `bytes`. The other pcapd fields are
+    /// irrelevant to the pure parsers, so they get neutral values.
+    fn pkt(bytes: Vec<u8>) -> Packet {
+        Packet {
+            pid: 0,
+            comm: String::new(),
+            epid: 0,
+            ecomm: String::new(),
+            interface: String::new(),
+            seconds: 0,
+            microseconds: 0,
+            io: 0,
+            data: bytes,
+        }
+    }
+
+    /// Prepend a 14-byte synthetic Ethernet header so `parse_summary` finds the
+    /// IP header at its first (offset 14) candidate — the common normalized case.
+    fn with_eth(ip_packet: Vec<u8>) -> Vec<u8> {
+        let mut data = vec![0u8; 14];
+        data.extend_from_slice(&ip_packet);
+        data
+    }
+
+    fn ipv4_tcp(src: [u8; 4], sp: u16, dst: [u8; 4], dp: u16) -> Vec<u8> {
+        let builder = etherparse::PacketBuilder::ipv4(src, dst, 64).tcp(sp, dp, 0, 1024);
+        let mut out = Vec::new();
+        builder.write(&mut out, &[]).expect("build ipv4/tcp");
+        out
+    }
+
+    fn ipv6_udp(src: [u8; 16], sp: u16, dst: [u8; 16], dp: u16) -> Vec<u8> {
+        let builder = etherparse::PacketBuilder::ipv6(src, dst, 64).udp(sp, dp);
+        let mut out = Vec::new();
+        builder.write(&mut out, &[]).expect("build ipv6/udp");
+        out
+    }
+
+    #[test]
+    fn direction_from_io_byte_treats_one_as_outbound() {
+        assert_eq!(Direction::from_io_byte(1), Direction::Out);
+        assert_eq!(Direction::from_io_byte(0), Direction::In);
+        assert_eq!(Direction::from_io_byte(2), Direction::In);
+        assert_eq!(Direction::Out.arrow(), "↑");
+        assert_eq!(Direction::In.arrow(), "↓");
+    }
+
+    #[test]
+    fn protocol_as_str_covers_every_variant() {
+        assert_eq!(Protocol::Tcp.as_str(), "TCP");
+        assert_eq!(Protocol::Udp.as_str(), "UDP");
+        assert_eq!(Protocol::Icmp.as_str(), "ICMP");
+        assert_eq!(Protocol::Other.as_str(), "OTHER");
+    }
+
+    #[test]
+    fn endpoint_display_brackets_ipv6_and_omits_missing_port() {
+        let v4 = Endpoint {
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            port: Some(443),
+        };
+        assert_eq!(v4.to_string(), "10.0.0.1:443");
+
+        let v6 = Endpoint {
+            ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            port: Some(53),
+        };
+        assert_eq!(v6.to_string(), "[::1]:53");
+
+        let v6_no_port = Endpoint {
+            ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            port: None,
+        };
+        assert_eq!(v6_no_port.to_string(), "[::1]");
+    }
+
+    #[test]
+    fn parse_summary_extracts_ipv4_tcp_endpoints() {
+        let data = with_eth(ipv4_tcp([10, 0, 0, 1], 51000, [93, 184, 216, 34], 443));
+        let parsed = parse_summary(&pkt(data)).expect("ipv4/tcp parses");
+        assert_eq!(parsed.protocol, Protocol::Tcp);
+        assert_eq!(parsed.src.to_string(), "10.0.0.1:51000");
+        assert_eq!(parsed.dst.to_string(), "93.184.216.34:443");
+    }
+
+    #[test]
+    fn parse_summary_extracts_ipv6_udp_endpoints() {
+        let src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).octets();
+        let dst = Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111).octets();
+        let data = with_eth(ipv6_udp(src, 5353, dst, 53));
+        let parsed = parse_summary(&pkt(data)).expect("ipv6/udp parses");
+        assert_eq!(parsed.protocol, Protocol::Udp);
+        assert_eq!(parsed.src.port, Some(5353));
+        assert_eq!(parsed.dst.port, Some(53));
+    }
+
+    #[test]
+    fn parse_summary_falls_back_to_raw_ip_offset_zero() {
+        // No Ethernet prefix: only the offset-0 candidate can match.
+        let data = ipv4_tcp([192, 168, 0, 2], 1234, [192, 168, 0, 1], 80);
+        let parsed = parse_summary(&pkt(data)).expect("raw ip parses at offset 0");
+        assert_eq!(parsed.dst.to_string(), "192.168.0.1:80");
+    }
+
+    #[test]
+    fn parse_summary_returns_none_for_garbage() {
+        assert!(parse_summary(&pkt(vec![])).is_none());
+        assert!(parse_summary(&pkt(vec![0xff; 8])).is_none());
+    }
+
+    /// Assemble a minimal DNS query message for `name` with qtype 1 (A).
+    fn dns_query(name: &str, qr_response: bool, qdcount: u16) -> Vec<u8> {
+        let mut p = vec![
+            0x12,
+            0x34, // ID
+            if qr_response { 0x80 } else { 0x00 },
+            0x00, // flags
+            (qdcount >> 8) as u8,
+            qdcount as u8, // QDCOUNT
+            0,
+            0,
+            0,
+            0,
+            0,
+            0, // AN/NS/AR
+        ];
+        for label in name.split('.') {
+            p.push(label.len() as u8);
+            p.extend_from_slice(label.as_bytes());
+        }
+        p.push(0); // root label
+        p.extend_from_slice(&[0x00, 0x01]); // QTYPE = A
+        p.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN
+        p
+    }
+
+    #[test]
+    fn parse_dns_query_reads_name_and_type() {
+        let q = parse_dns_query(&dns_query("example.com", false, 1)).expect("dns query parses");
+        assert_eq!(q.qname, "example.com");
+        assert_eq!(q.qtype, "A");
+    }
+
+    #[test]
+    fn parse_dns_query_rejects_responses_and_empty_question() {
+        assert!(parse_dns_query(&dns_query("a.b", true, 1)).is_none());
+        assert!(parse_dns_query(&dns_query("a.b", false, 0)).is_none());
+        assert!(parse_dns_query(&[0u8; 4]).is_none()); // shorter than header
+    }
+
+    #[test]
+    fn dns_qtype_name_maps_known_and_unknown_codes() {
+        assert_eq!(dns_qtype_name(1), "A");
+        assert_eq!(dns_qtype_name(28), "AAAA");
+        assert_eq!(dns_qtype_name(65), "HTTPS");
+        assert_eq!(dns_qtype_name(9999), "TYPE9999");
+    }
+
+    /// Assemble a minimal TLS ClientHello record carrying `host` in SNI.
+    fn client_hello_with_sni(host: &str) -> Vec<u8> {
+        let host = host.as_bytes();
+        // server_name extension data: list_len(2) name_type(1) name_len(2) host
+        let mut ext_data = Vec::new();
+        let sni_entry_len = (1 + 2 + host.len()) as u16;
+        ext_data.extend_from_slice(&sni_entry_len.to_be_bytes());
+        ext_data.push(0); // name_type = host_name
+        ext_data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        ext_data.extend_from_slice(host);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&[0x00, 0x00]); // ext_type = server_name
+        extensions.extend_from_slice(&(ext_data.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&ext_data);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session_id length
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // cipher suites
+        body.extend_from_slice(&[0x01, 0x00]); // compression methods
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = vec![0x01]; // ClientHello
+        let blen = body.len();
+        handshake.extend_from_slice(&[(blen >> 16) as u8, (blen >> 8) as u8, blen as u8]);
+        handshake.extend_from_slice(&body);
+
+        let mut record = vec![0x16, 0x03, 0x03]; // handshake, TLS 1.2 record
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    #[test]
+    fn extract_sni_reads_hostname_from_client_hello() {
+        let record = client_hello_with_sni("quokka.example.com");
+        assert_eq!(extract_sni(&record).as_deref(), Some("quokka.example.com"));
+    }
+
+    #[test]
+    fn extract_sni_rejects_non_tls_payloads() {
+        assert!(extract_sni(&[]).is_none());
+        assert!(extract_sni(&[0x17, 0x03, 0x03, 0x00, 0x05]).is_none()); // not handshake
+        assert!(extract_sni(&[0x16, 0x03]).is_none()); // truncated record header
+    }
+
+    // --- Property tests: tolerant parsers never panic on arbitrary input. ---
+    proptest::proptest! {
+        #[test]
+        fn parse_summary_never_panics(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)) {
+            let _ = parse_summary(&pkt(data));
+        }
+
+        #[test]
+        fn parse_dns_query_never_panics(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)) {
+            let _ = parse_dns_query(&data);
+        }
+
+        #[test]
+        fn extract_sni_never_panics(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)) {
+            let _ = extract_sni(&data);
+        }
+    }
+}

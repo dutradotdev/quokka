@@ -1,0 +1,14 @@
+# Real-device E2E cases for `qk analyze` (QA strategy, layer 5).
+# analyze defaults to a dry run (no deletion unless --delete). The AFC media
+# walk is an iOS capability; on Android it degrades, so these require iOS.
+
+- id: analyze-dry-run-lists-heaviest-media
+  description: analyze --top N lists the heaviest media without deleting anything.
+  command: qk analyze --top 5
+  requires: [ios]
+  verify:
+    - exit_code: 0
+
+# NOTE: `qk analyze --delete` and `qk power` (reboot/shutdown) are intentionally
+# NOT in the default suite — they mutate the device. Exercise them by hand, or
+# add a case behind an explicit opt-in once the harness grows a destructive tier.

@@ -1,0 +1,26 @@
+# Real-device E2E cases for the bare `qk` launcher (QA strategy, layer 5).
+# The bare launcher is the ratatui sidebar: device list on the left, the
+# selected device's dashboard over a capability-aware action menu on the right.
+
+- id: launcher-sidebar-opens-and-quits
+  description: >
+    The bare launcher opens the sidebar, shows the action menu, and quits on
+    `q`. On Android the Capture action must be hidden (no packet capture).
+  command: qk
+  requires: [any]
+  interact:
+    - wait_for: "select"
+  verify:
+    - frame_matches: "Apps"
+    - frame_matches: "Analyze"
+  quit_keys: ["q"]
+
+- id: launcher-hides-capture-on-android
+  description: Android has no packet capture; the action menu must omit it.
+  command: qk
+  requires: [android]
+  interact:
+    - wait_for: "select"
+  verify:
+    - frame_excludes: "Capture"
+  quit_keys: ["q"]

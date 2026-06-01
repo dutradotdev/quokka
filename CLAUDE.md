@@ -54,7 +54,14 @@ When the sidebar launches an action it tears its terminal down completely (drops
 3. **E2E tests** in `tests/e2e_*.rs` behind `--features e2e` — drive the real `idevice` backend (`RealDevice`) against a physical iPhone over USB, through the same library entry points as the integration tests. **Never run in CI** — CI only compile-checks them.
 4. **Android E2E** in `tests/e2e_android.rs` behind `--features e2e-android` — drives the real `AndroidDevice` backend against a physical Android device over `adb`, through the same library entry point. Asserts at least one app reports a non-zero `dumpsys diskstats` size. Skips gracefully when no device is attached. **Never run in CI** — CI only compile-checks it.
 
-Always write unit and integration tests in the same change as the code, not after.
+Cross-cutting tools layered on top of 1–2:
+- **Property tests** (`proptest`, a dev-dep) live next to the tolerant parsers (`commands/capture/parser.rs`, `device/android.rs`). The invariant is "arbitrary input never panics" — the executable form of the tolerant-parsing-not-per-OEM-branching rule. Add one whenever you add or change a parser.
+- **Snapshot tests** (`insta`, a dev-dep) lock in deterministic rendered output (dashboard, `card` SVG, `ui.rs` formatters, `--json`). Review changes with `cargo insta review`.
+
+5. **Real-device E2E via tmux** — the `/qa` layer in `tests/llm/`, driven by Claude Code (skill at `.claude/skills/qa/SKILL.md`, mechanics in `tests/llm/lib/drive.sh`). Runs the real binary against an attached iPhone/Android through `tmux`, covering interactive TUIs and real-hardware behavior. Verification is **deterministic** (exit code / regex / golden frame) — no LLM judge. **Not run in CI** (needs a device); it is a pre-release checklist step. Requires `tmux`. See `tests/llm/README.md`.
+6. **Exploratory LLM pass** — advisory only, never a gate (the optional tail of the `/qa` skill).
+
+Always write unit and integration tests in the same change as the code, not after. A bug fix ships with a regression test reproducing the bug. The full strategy and its rationale live in `docs/superpowers/specs/2026-06-01-qa-strategy-design.md`. CI adds a **coverage ratchet** (`cargo-llvm-cov`) on pull requests: head coverage may not drop below the base branch.
 
 ### iOS / `idevice` notes
 

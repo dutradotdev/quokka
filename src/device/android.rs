@@ -1000,4 +1000,49 @@ mod tests {
         assert_eq!(sizes["com.whatsapp.w4b"], 193_439_232 + 139_890_688);
         assert_eq!(sizes["com.miui.gallery"], 182_879_744 + 200_941_568);
     }
+
+    // --- Property tests: tolerant parsers never panic on OEM variation. ---
+    // The project's rule is "tolerant parsing, not per-OEM branching"; these
+    // fuzz that invariant instead of enumerating manufacturers by hand.
+    proptest::proptest! {
+        #[test]
+        fn parsers_never_panic_on_arbitrary_input(s in "(?s).{0,400}") {
+            let _ = parse_battery(&s);
+            let _ = parse_df(&s);
+            let _ = parse_diskstats(&s);
+            let _ = parse_pm_packages(&s);
+            let _ = parse_find_output(&s);
+            let _ = parse_device_line(&s);
+            let _ = parse_logcat_line(&s);
+        }
+
+        /// `parse_diskstats` matches three parallel arrays by index. OEM dumps
+        /// routinely ship arrays of mismatched length; that must never panic.
+        #[test]
+        fn parse_diskstats_survives_ragged_arrays(
+            names in proptest::collection::vec("[a-z][a-z.]{0,20}", 0..12),
+            sizes in proptest::collection::vec(0u64..1_000_000_000, 0..12),
+            data_sizes in proptest::collection::vec(0u64..1_000_000_000, 0..12),
+        ) {
+            let join = |v: &[u64]| {
+                v.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            };
+            let quoted = names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            let out = format!(
+                "Package Names: [{quoted}]\nApp Sizes: [{}]\nApp Data Sizes: [{}]\n",
+                join(&sizes),
+                join(&data_sizes),
+            );
+            let result = parse_diskstats(&out);
+            // Every reported entry must correspond to a real package name —
+            // a ragged array must never invent or mis-key a package.
+            for key in result.keys() {
+                proptest::prop_assert!(names.iter().any(|n| n == key));
+            }
+        }
+    }
 }

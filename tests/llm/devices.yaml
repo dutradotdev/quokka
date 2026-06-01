@@ -1,0 +1,17 @@
+# Real-device E2E cases for `qk devices` (QA strategy, layer 5).
+
+- id: devices-lists-connected
+  description: devices lists at least the attached device with its platform.
+  command: qk devices
+  requires: [any]
+  verify:
+    - exit_code: 0
+
+- id: devices-json-is-well-formed
+  description: --json emits a parseable array with a platform field per device.
+  command: qk devices --json
+  requires: [any]
+  verify:
+    - exit_code: 0
+    - json_valid: true
+    - output_matches: "\"platform\""

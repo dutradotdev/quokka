@@ -201,3 +201,120 @@ impl HostAggregator {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::capture::Protocol;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn pkt(pid: u32, io: u8, len: usize) -> Packet {
+        Packet {
+            pid,
+            comm: format!("proc{pid}"),
+            epid: pid,
+            ecomm: format!("proc{pid}"),
+            interface: "en0".into(),
+            seconds: 0,
+            microseconds: 0,
+            io,
+            data: vec![0u8; len],
+        }
+    }
+
+    /// A parsed packet whose *remote* endpoint (the one the aggregator keys on)
+    /// is `(ip, port)`. For an outbound packet (`io == 1`) the remote is `dst`.
+    fn parsed_to(ip: [u8; 4], port: Option<u16>) -> ParsedPacket {
+        let remote = Endpoint {
+            ip: IpAddr::V4(Ipv4Addr::from(ip)),
+            port,
+        };
+        let local = Endpoint {
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+            port: Some(40000),
+        };
+        ParsedPacket {
+            protocol: Protocol::Tcp,
+            src: local,
+            dst: remote,
+        }
+    }
+
+    #[test]
+    fn new_aggregator_is_empty() {
+        assert!(HostAggregator::new().is_empty());
+    }
+
+    #[test]
+    fn add_splits_bytes_by_direction() {
+        let mut agg = HostAggregator::new();
+        let host = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        // Outbound: the aggregator keys on `dst`.
+        agg.add(&pkt(1, 1, 100), &parsed_to([1, 1, 1, 1], Some(443)));
+        // Inbound: it keys on `src`, so the same remote host must sit there.
+        let inbound = ParsedPacket {
+            protocol: Protocol::Tcp,
+            src: Endpoint {
+                ip: host,
+                port: Some(443),
+            },
+            dst: Endpoint {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+                port: Some(40000),
+            },
+        };
+        agg.add(&pkt(1, 0, 40), &inbound);
+        let stats = &agg.per_proc[&(1, "proc1".into())][&(host, 443)];
+        assert_eq!(stats.pkts, 2);
+        assert_eq!(stats.bytes_out, 100);
+        assert_eq!(stats.bytes_in, 40);
+    }
+
+    #[test]
+    fn add_skips_packets_without_a_remote_port() {
+        let mut agg = HostAggregator::new();
+        agg.add(&pkt(1, 1, 100), &parsed_to([1, 1, 1, 1], None));
+        assert!(agg.is_empty());
+    }
+
+    #[test]
+    fn recent_tail_is_capped() {
+        let mut agg = HostAggregator::new();
+        for _ in 0..(RECENT_CAP + 5) {
+            agg.add(&pkt(1, 1, 10), &parsed_to([2, 2, 2, 2], Some(80)));
+        }
+        let stats =
+            &agg.per_proc[&(1, "proc1".into())][&(IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)), 80)];
+        assert_eq!(stats.recent.len(), RECENT_CAP);
+        assert_eq!(stats.pkts, (RECENT_CAP + 5) as u64);
+    }
+
+    #[test]
+    fn render_orders_hosts_by_descending_traffic() {
+        let mut agg = HostAggregator::new();
+        // Light host first, heavy host second — render must lead with heavy.
+        agg.add(&pkt(1, 1, 10), &parsed_to([1, 1, 1, 1], Some(80)));
+        agg.add(&pkt(1, 1, 5000), &parsed_to([2, 2, 2, 2], Some(443)));
+        let out = agg.render("HEADER");
+        let heavy = out.find("2.2.2.2").expect("heavy host rendered");
+        let light = out.find("1.1.1.1").expect("light host rendered");
+        assert!(heavy < light, "heavier host should sort first:\n{out}");
+    }
+
+    #[test]
+    fn overflow_bucket_folds_processes_beyond_the_cap() {
+        let mut agg = HostAggregator::new();
+        // Fill exactly to the process cap with distinct pids.
+        for pid in 0..MAX_TRACKED_PROCS as u32 {
+            agg.add(&pkt(pid, 1, 10), &parsed_to([3, 3, 3, 3], Some(443)));
+        }
+        // One more distinct process must fold into overflow, not grow the map.
+        agg.add(&pkt(9_999, 1, 70), &parsed_to([4, 4, 4, 4], Some(443)));
+        assert_eq!(agg.per_proc.len(), MAX_TRACKED_PROCS);
+        let out = agg.render("HEADER");
+        assert!(
+            out.contains("from capped processes/endpoints not shown"),
+            "overflow notice expected:\n{out}"
+        );
+    }
+}

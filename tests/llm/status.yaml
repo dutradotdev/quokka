@@ -1,0 +1,13 @@
+# Real-device E2E cases for `qk status` (QA strategy, layer 5).
+# Non-interactive: the command completes on its own, so `verify` checks the
+# captured output and the exit code.
+
+- id: status-renders-dashboard
+  description: status prints the full dashboard — storage bar, battery, app count.
+  command: qk status
+  requires: [any] # works on iOS or Android
+  verify:
+    - exit_code: 0
+    - output_matches: "Storage"
+    - output_matches: "Battery"
+    - output_matches: "[0-9]+ apps"

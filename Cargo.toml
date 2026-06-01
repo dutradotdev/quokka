@@ -130,6 +130,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 insta = "1"
 # Temp files for capture-writer roundtrip tests (write a packet, read it back).
 tempfile = "3"
+# Property testing for the tolerant parsers (packet parser, Android dumpsys /
+# diskstats). The invariant under test is "arbitrary input never panics" — the
+# executable form of the project's tolerant-parsing-not-per-OEM-branching rule.
+proptest = "1"
 
 # Generate this profile section with `dist init`; it controls the release
 # binary's size + speed when shipped via Homebrew / curl installer.
