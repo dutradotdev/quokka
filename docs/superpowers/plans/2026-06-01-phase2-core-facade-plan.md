@@ -158,3 +158,67 @@ Prompt sugerido para retomar:
 > spec em `docs/superpowers/specs/2026-06-01-phase2-core-facade-design.md`.
 > Antes de começar, lê os dois arquivos e me apresenta um resumo do que vai
 > fazer."
+
+---
+
+## Status de execução (2026-06-01)
+
+- **Passo 1** — concluído (`d30d2cc`). `DeviceError`/`CardData` serializáveis.
+- **Passo 2** — concluído (`fa6ecaa`). Facade `app::*`, DTOs, `app::redact`.
+- **Passo 3** — concluído (`8039e0f`). `--json` genérico + NDJSON em `logs`.
+- **Passo 4** — **não iniciado** (split de workspace). Ver descobertas abaixo.
+
+Desvios assumidos nos Passos 1–3 (sinalizados para revisão):
+
+- **Relocação física da lógica pura adiada para o Passo 4.** O facade reusa a
+  lógica pura *no lugar* (em `commands::*`) por enquanto. Isso é o que torna o
+  Passo 4 mais pesado do que o "mecânico" originalmente previsto.
+- **`qk info --json` mudou de forma** — agora é o DTO `DeviceInfo` plano em
+  camelCase (o payload que a GUI consome), não mais o objeto aninhado
+  snake_case artesanal. Quebra para quem fazia parsing do formato antigo.
+- **`app::analyze` recebe `now_unix`** como parâmetro (determinismo/teste), em
+  vez de chamar `now_unix()` por dentro.
+- **`capture --json` ficou de fora** (os modos `hosts`/`dns`/`sni` + a TUI
+  tornam o NDJSON de stream uma mudança maior e arriscada). `capture --json`
+  hoje é rejeitado com mensagem clara, igual ao `card --json`.
+
+## Descobertas do Passo 4 (bloqueadores do split limpo)
+
+Um `quokka-core` **livre de apresentação** (o que a Fase D precisa) exige
+resolver, antes do `git mv`, três acoplamentos que hoje cruzam a fronteira:
+
+1. **`device::connect` tem um picker `dialoguer`** embutido
+   (`src/device/mod.rs:664` e `:1189`) — apresentação interativa dentro do
+   módulo que deveria virar core. Decisão de design pendente: extrair o picker
+   para a CLI (o `connect` retorna uma lista e a CLI escolhe) ou aceitar uma
+   dependência de `dialoguer` no core. **Precisa de decisão do Lucas.**
+2. **`device/` depende de `commands::logs::parser`** (`parse_syslog_line`,
+   `is_continuation`) — o parser de syslog é puro e precisa migrar para o core
+   (ex.: `core::logic::syslog`) antes de `device/` poder ir junto.
+3. **`app/` depende de lógica pura ainda dentro de módulos de comando** que
+   misturam puro + apresentação: `commands::media` (agregações), 
+   `commands::analyze::heuristics` (+ `sort_by_size`/`ext_lower`/`kind_from_ext`),
+   `commands::card::{data,badges,render,png,share,emoji}` (puros), e os
+   formatadores puros de `ui.rs` (`format_bytes`, `civil_from_unix`,
+   `now_unix`, …) + `commands::top_n_by_size`. Cada um precisa ser fatiado em
+   parte-pura (core) e parte-apresentação (CLI).
+
+### Sub-plano sugerido para o Passo 4 (quando retomado)
+
+Truque de baixo atrito: a CLI **re-exporta** os símbolos do core nos caminhos
+antigos (`pub use quokka_core::fmt::*` em `cli::ui`; `pub use
+quokka_core::logic::media::*` em `cli::commands::media`; etc.), evitando reescrever
+as ~44 chamadas `crate::ui::*` e as referências `crate::commands::<puro>` espalhadas.
+
+1. Decidir o destino do picker do `connect` (pergunta 1 acima).
+2. Extrair para `quokka-core`: `device/` (após mover o parser de syslog para
+   `core::logic::syslog` e resolver o picker), `app/`, `core::fmt` (formatadores
+   puros + `now_unix`), `core::logic::{media,analyze}`, `core::card` (camadas
+   puras), `core::top_n_by_size`.
+3. Criar o `Cargo.toml` de workspace + `crates/quokka-core` + `crates/quokka-cli`;
+   mover os pins `=idevice`/`=forensic-adb` para o core.
+4. Na CLI: re-exportar os símbolos do core nos caminhos antigos; manter
+   bins/`lib.rs`/TUIs/renderers/`ui` terminal-coupled.
+5. Mover os testes (facade+`FakeDevice` → core; parser do clap + snapshots → CLI;
+   `e2e`/`e2e-android` → exercitar o facade no core).
+6. Atualizar `ARCHITECTURE.md`, `CLAUDE.md` e o `README` (seção `--json`).
