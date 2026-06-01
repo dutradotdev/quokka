@@ -1,0 +1,160 @@
+# Implementation Plan — Fase 2 (quokka-core + facade + --json)
+
+Date: 2026-06-01
+Spec: `docs/superpowers/specs/2026-06-01-phase2-core-facade-design.md`
+Status: Approved, ready to implement starting with Passo 1
+Branch: `phase2-core-facade`
+
+**Entrega em PR único.** Os quatro passos abaixo são commits na mesma branch,
+na ordem serializável → facade → json → split. Cada commit compila e mantém
+`cargo fmt && clippy -D warnings && test` verde (o hook `PostToolUse` já força
+isso a cada edição em `.rs`/`Cargo.toml`). Não há merge intermediário; o split
+de workspace é o último commit porque os passos 2 e 3 já deixam os módulos
+organizados por pureza, tornando o recorte mecânico.
+
+Testes fazem parte de cada passo, não são deixados para o fim.
+
+## Passo 1 — Fronteira serializável (zero comportamento novo)
+
+**Entregáveis:**
+- `DeviceError` (`src/device/mod.rs:27`) passa a serializar como
+  `{ "kind": "<Variant>", "message": "<Display>" }`. Como `thiserror` deriva o
+  `Display` mas não o JSON desejado, implementar `Serialize` à mão
+  (`serialize_struct` com `kind` = nome da variante via um `fn kind(&self) ->
+  &'static str`, `message` = `self.to_string()`). Só `Serialize` — nada
+  desserializa `DeviceError` em Rust (a GUI lê o JSON em JS).
+- `Serialize` na família `CardData` em `src/commands/card/data.rs`: `CardData`,
+  `StorageBreakdownRows`, `TopApp`, `StorageFallback`, `AppsJailbreakLabel`,
+  `HealthTier`.
+
+**Testes (unit):**
+- `DeviceError` serializa para o `{ kind, message }` esperado, uma asserção por
+  variante representativa (`NotPaired`, `AdbNotFound`, `Other`).
+- `CardData` faz round-trip `serde` (serializa→desserializa→igual).
+
+**Critérios de aceite:**
+- `fmt && clippy -D warnings && test` verde.
+- Nenhuma mudança de comportamento de runtime; diff é só derives + impl de
+  `Serialize`.
+
+**Anti-objetivos:** nada de facade nem `--json` ainda.
+
+---
+
+## Passo 2 — Facade `app::*` + DTOs + redação pura
+
+**Entregáveis:**
+- Novo módulo `src/app/` (vira `quokka-core::app` no Passo 4), com uma função
+  por operação, todas devolvendo `Result<_, DeviceError>`:
+  - `app::status`, `app::info(redact)`, `app::apps(on_batch)`,
+    `app::analyze(on_progress)`, `app::media(find_dupes, on_progress)`,
+    `app::delete_files(paths)`, `app::card(now_unix, redact)`, `app::reboot`,
+    `app::shutdown`, `app::stream_logs`.
+  - Captura segue por `Device::as_capture()` (inalterado).
+- DTOs novos, todos `Serialize`/`Deserialize`:
+  - `AnalyzeReport { files: Vec<MediaFile> ordenados, marks: AutoMarks }`
+    (reaproveita `heuristics::detect_all`).
+  - `MediaReport` (promove o report interno do `media.rs`: counts por kind,
+    buckets por mês, top-N, grupos duplicados).
+  - `DeleteOutcome { deleted: Vec<String>, failed: Vec<(String, String)> }`.
+  - `RenderedCard { data: CardData, svg: String, png: Vec<u8> }`.
+- Redação como função pura: `app::redact::device_info(DeviceInfo) -> DeviceInfo`
+  e `app::redact::card_data(CardData) -> CardData`, aplicadas pelo facade quando
+  a flag está ligada. Remover a lógica de máscara enterrada em `info.rs`/`card`.
+- Reescrever cada `commands::*::run()` para: chamar `app::*`, depois só
+  renderizar/interagir por cima do DTO. As TUIs (`apps`, `analyze`, `capture`,
+  `logs`, `sidebar`), o renderer `dashboard` e os prompts continuam na camada de
+  comando.
+- Mover a lógica pura para o layout que ela terá no core (já em `src/`, mas na
+  forma final): heurísticos do `analyze`, agregações do `media`, agregação de
+  hosts + `parser` do `capture`, e as cinco camadas puras do `card`.
+
+**Testes (integração via `FakeDevice`):**
+- Um teste por função `app::*` asserindo o DTO retornado (não a saída de texto).
+- Round-trip `serde` de `AnalyzeReport`, `MediaReport`, `DeleteOutcome`,
+  `RenderedCard`.
+- `app::info(redact: true)` mascara serial/UDID/IMEI/MAC; `redact: false` não.
+- Migrar `tests/integration.rs` para asserir nos DTOs do facade.
+
+**Critérios de aceite:**
+- `fmt && clippy && test` verde.
+- Saída de runtime da CLI idêntica à de hoje (os renderers consomem o DTO; o
+  texto não muda).
+
+---
+
+## Passo 3 — `--json` genérico
+
+**Entregáveis:**
+- Dispatch genérico no `src/lib.rs`: para cada one-shot, chamar `app::*` e, se
+  `cli.json`, imprimir `serde_json::to_string_pretty(&dto)`; senão renderizar.
+- Remover o gate `command_supports_json` (`lib.rs:259`) — `status`, `info`,
+  `apps`, `analyze`, `media`, `devices` passam todos a aceitar `--json`.
+- `logs --json` → NDJSON ao vivo (uma linha por `LogEntry`); implica caminho
+  `--no-tui`.
+- `capture --json` → NDJSON de `Packet` no modo stream. Modos `hosts`/`dns`/`sni`
+  seguem texto (anotado como extensão futura).
+- `card` permanece fora do `--json`.
+
+**Testes:**
+- Snapshot de JSON por comando one-shot (saída estável dado um `FakeDevice`
+  fixo).
+- `logs --json`/`capture --json`: N eventos do fake → N linhas JSON válidas,
+  uma por evento.
+- Atualizar os testes de parser do clap se a superfície de flags mudar.
+
+**Critérios de aceite:**
+- `fmt && clippy && test` verde.
+- `qk status --json`, `qk media --json`, etc. emitem o DTO; `qk card --json`
+  ainda é rejeitado com mensagem clara.
+
+---
+
+## Passo 4 — Split de workspace (mecânico)
+
+**Entregáveis:**
+- Estrutura `crates/quokka-core/` + `crates/quokka-cli/`; `Cargo.toml` de
+  workspace na raiz com os dois members.
+- `git mv` para o core: `device/` inteiro (trait, `real`, `android`,
+  `FakeDevice`, tipos), `app/`, a lógica pura movida no Passo 2, os formatadores
+  puros do `ui.rs` (`format_bytes`, `format_bar`, `format_percent`,
+  `format_optional`, `civil_from_days`, `civil_from_unix`).
+- `git mv` para a CLI: bins, `lib.rs`, as TUIs/`dashboard`/`menu`/
+  `device_action`, os pedaços terminal-coupled do `ui.rs`, o `run()` do `card`
+  (escrita de PNG + `open`), `update`.
+- Pins `=idevice` / `=forensic-adb` migram para o `Cargo.toml` do core.
+- Ajustar paths de `use` (`crate::` → `quokka_core::` na CLI).
+- Mover os testes: integração com `FakeDevice` + facade → `crates/quokka-core/`;
+  parser do clap + snapshots de render → `crates/quokka-cli/`; `e2e`/
+  `e2e-android` passam a exercitar o facade no core.
+- `examples/chaos_cards.rs` → exemplo do core (usa render puro).
+- Atualizar `docs/ARCHITECTURE.md` e `CLAUDE.md` descrevendo o workspace e o
+  facade.
+
+**Critérios de aceite:**
+- `fmt && clippy && test` verde da raiz do workspace.
+- `cargo test --features e2e` e `--features e2e-android` compilam.
+- Diff é puramente movimentação + paths + `Cargo.toml`; sem mudança de lógica.
+- O hook `PostToolUse` e o CI seguem rodando da raiz sem ajuste.
+- `rust-toolchain.toml` inalterado.
+
+---
+
+## Ordem & dependências
+
+```
+1 (serializável) → 2 (facade + DTOs) → 3 (--json) → 4 (split de workspace)
+```
+
+Tudo na branch `phase2-core-facade`, um commit por passo, PR único no fim. Após
+cada passo, pausa para confirmação antes do próximo.
+
+## Quando re-entrar (e.g. após /clear)
+
+Prompt sugerido para retomar:
+
+> "Implementa o Passo 1 do plano em
+> `docs/superpowers/plans/2026-06-01-phase2-core-facade-plan.md`, baseado na
+> spec em `docs/superpowers/specs/2026-06-01-phase2-core-facade-design.md`.
+> Antes de começar, lê os dois arquivos e me apresenta um resumo do que vai
+> fazer."
