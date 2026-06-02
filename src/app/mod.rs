@@ -16,17 +16,17 @@ pub mod redact;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
 
-use crate::commands::card::data::{self, CardData};
-use crate::commands::card::{png, render};
-use crate::commands::{analyze, media};
+use crate::card::data::{self, CardData};
+use crate::card::{png, render};
 use crate::device::{
     App, BatchCallback, Device, DeviceError, DeviceInfo, DeviceStatus, LogEntry, MediaFile,
     WalkCallback,
 };
+use crate::logic::{analyze, media};
 
-// Re-export the report DTOs that already live next to their pure builders, so
-// callers reach the whole facade surface through `app::`.
-pub use crate::commands::media::MediaReport;
+// Re-export the report DTO that lives next to its pure builders, so callers
+// reach the whole facade surface through `app::`.
+pub use crate::logic::media::MediaReport;
 
 /// Recover the typed [`DeviceError`] from an `anyhow::Error`, falling back to
 /// [`DeviceError::Other`] when the source wasn't a `DeviceError`. This is the
@@ -141,7 +141,7 @@ pub async fn media(
     Ok(media::build_report(
         &files,
         find_duplicates,
-        crate::ui::now_unix(),
+        crate::fmt::now_unix(),
         None,
         device.media_roots(),
     ))

@@ -406,7 +406,7 @@ pub fn pick_footer_cta(now_unix: i64) -> &'static str {
 pub fn build_identity_label(status: &DeviceStatus) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(app) = status.oldest_app.as_ref() {
-        let (y, _, _, _, _, _) = crate::ui::civil_from_unix(app.install_date_unix);
+        let (y, _, _, _, _, _) = crate::fmt::civil_from_unix(app.install_date_unix);
         parts.push(format!("{} since {y}", app.display_name));
     }
     if let Some(n) = status.app_count {
@@ -455,7 +455,7 @@ impl BadgeInputs {
             .map(|ts| ((now_unix - ts).max(0) / SECONDS_PER_YEAR) as u32);
         let paired_year = status
             .paired_since_unix
-            .map(|ts| crate::ui::civil_from_unix(ts).0);
+            .map(|ts| crate::fmt::civil_from_unix(ts).0);
         let storage_used_percent = status.storage.map(Storage::used_percent);
         let storage_total_gb = status.storage.map(|s| s.total_bytes / 1_000_000_000);
         let backup_age_days = status
@@ -620,7 +620,7 @@ pub fn build_first_seen_line(
     redact: bool,
 ) -> Option<String> {
     let paired = paired_unix?;
-    let (y, m, _, _, _, _) = crate::ui::civil_from_unix(paired);
+    let (y, m, _, _, _, _) = crate::fmt::civil_from_unix(paired);
     let base = if redact {
         format!("{y}")
     } else {
@@ -653,7 +653,7 @@ pub fn format_backup_age(now_unix: i64, backup_unix: i64, redact: bool) -> Strin
 
 /// `"May 27"` — abbreviated month + day, no year.
 pub fn format_footer_date(now_unix: i64) -> String {
-    let (_, m, d, _, _, _) = crate::ui::civil_from_unix(now_unix);
+    let (_, m, d, _, _, _) = crate::fmt::civil_from_unix(now_unix);
     format!("{} {d}", month_name(m))
 }
 
@@ -792,7 +792,7 @@ mod tests {
                 .expect("paired present");
         assert!(line.contains("Spotify is your oldest"), "got `{line}`");
         assert!(line.starts_with(month_name(
-            crate::ui::civil_from_unix(status.paired_since_unix.unwrap()).1
+            crate::fmt::civil_from_unix(status.paired_since_unix.unwrap()).1
         )));
     }
 

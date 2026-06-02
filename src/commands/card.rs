@@ -13,12 +13,12 @@ use owo_colors::OwoColorize;
 use crate::device::Device;
 use crate::ui::{civil_from_unix, spinner};
 
-pub mod badges;
-pub mod data;
-pub mod emoji;
-pub mod png;
-pub mod render;
-pub mod share;
+// The pure card layers (projection, badges, SVG render, PNG raster, share URL,
+// emoji) moved to the core (`crate::card`). Re-export them at the historical
+// `commands::card::*` paths so this module's `run` keeps calling `data::`,
+// `render::`, `png::`, `share::` unchanged, and tests/examples that reach
+// `commands::card::{data, render, png, …}` keep resolving.
+pub use crate::card::{badges, data, emoji, png, render, share};
 
 /// CLI arguments wired from clap in `src/lib.rs`.
 #[derive(Debug, Clone)]

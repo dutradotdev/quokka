@@ -14,8 +14,8 @@ use resvg::usvg;
 /// Square canvas the renderer emits.
 pub const CANVAS_PX: u32 = 1080;
 
-const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
-const FONT_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Medium.ttf");
+const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+const FONT_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf");
 
 /// Shared font database — built once per process. The system-font scan
 /// alone takes 50-100ms on macOS; doing it on every card would dominate

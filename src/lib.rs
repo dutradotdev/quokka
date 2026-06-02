@@ -6,8 +6,11 @@ use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 pub mod app;
+pub mod card;
 pub mod commands;
 pub mod device;
+pub mod fmt;
+pub mod logic;
 pub mod ui;
 
 use crate::device::LogLevel;

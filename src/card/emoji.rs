@@ -10,24 +10,24 @@
 
 use super::badges::BadgeId;
 
-const UNTOUCHABLE: &str = include_str!("../../../assets/emoji/untouchable.svg");
-const BATTERY_CHAMP: &str = include_str!("../../../assets/emoji/battery_champ.svg");
-const CHARGING_WIZARD: &str = include_str!("../../../assets/emoji/charging_wizard.svg");
-const OG_OWNER: &str = include_str!("../../../assets/emoji/og_owner.svg");
-const DAY_ONE: &str = include_str!("../../../assets/emoji/day_one.svg");
-const SURVIVOR: &str = include_str!("../../../assets/emoji/survivor.svg");
-const VETERAN: &str = include_str!("../../../assets/emoji/veteran.svg");
-const STORAGE_TITAN: &str = include_str!("../../../assets/emoji/storage_titan.svg");
-const MAXED_OUT: &str = include_str!("../../../assets/emoji/maxed_out.svg");
-const HEAVY_CYCLE: &str = include_str!("../../../assets/emoji/heavy_cycle.svg");
-const BETA_TESTER: &str = include_str!("../../../assets/emoji/beta_tester.svg");
-const BACKUP_OVERDUE: &str = include_str!("../../../assets/emoji/backup_overdue.svg");
-const MINIMALIST: &str = include_str!("../../../assets/emoji/minimalist.svg");
-const APP_COLLECTOR: &str = include_str!("../../../assets/emoji/app_collector.svg");
-const PRO_MAX_CLUB: &str = include_str!("../../../assets/emoji/pro_max_club.svg");
-const TIDY_HOARDER: &str = include_str!("../../../assets/emoji/tidy_hoarder.svg");
-const BACKUP_FRESH: &str = include_str!("../../../assets/emoji/backup_fresh.svg");
-const SPEED_DEMON: &str = include_str!("../../../assets/emoji/speed_demon.svg");
+const UNTOUCHABLE: &str = include_str!("../../assets/emoji/untouchable.svg");
+const BATTERY_CHAMP: &str = include_str!("../../assets/emoji/battery_champ.svg");
+const CHARGING_WIZARD: &str = include_str!("../../assets/emoji/charging_wizard.svg");
+const OG_OWNER: &str = include_str!("../../assets/emoji/og_owner.svg");
+const DAY_ONE: &str = include_str!("../../assets/emoji/day_one.svg");
+const SURVIVOR: &str = include_str!("../../assets/emoji/survivor.svg");
+const VETERAN: &str = include_str!("../../assets/emoji/veteran.svg");
+const STORAGE_TITAN: &str = include_str!("../../assets/emoji/storage_titan.svg");
+const MAXED_OUT: &str = include_str!("../../assets/emoji/maxed_out.svg");
+const HEAVY_CYCLE: &str = include_str!("../../assets/emoji/heavy_cycle.svg");
+const BETA_TESTER: &str = include_str!("../../assets/emoji/beta_tester.svg");
+const BACKUP_OVERDUE: &str = include_str!("../../assets/emoji/backup_overdue.svg");
+const MINIMALIST: &str = include_str!("../../assets/emoji/minimalist.svg");
+const APP_COLLECTOR: &str = include_str!("../../assets/emoji/app_collector.svg");
+const PRO_MAX_CLUB: &str = include_str!("../../assets/emoji/pro_max_club.svg");
+const TIDY_HOARDER: &str = include_str!("../../assets/emoji/tidy_hoarder.svg");
+const BACKUP_FRESH: &str = include_str!("../../assets/emoji/backup_fresh.svg");
+const SPEED_DEMON: &str = include_str!("../../assets/emoji/speed_demon.svg");
 
 /// Raw Twemoji SVG bytes for a badge. Always returns the full
 /// `<svg>…</svg>` document — the caller strips the wrapper.

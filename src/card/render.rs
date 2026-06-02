@@ -197,7 +197,7 @@ fn render_chrome(svg: &mut String, y: i32) -> i32 {
 // Card mascot — pixel-art quokka, embedded as a base64 PNG data URI so the
 // generated SVG stays self-contained (no external file references when the
 // rasteriser ingests it).
-const MASCOT_PNG: &[u8] = include_bytes!("../../../assets/quokka.png");
+const MASCOT_PNG: &[u8] = include_bytes!("../../assets/quokka.png");
 
 /// Edge of the square box the mascot is rendered into. Matches the vertical
 /// band the old 7-line ASCII art reserved (7 × 28 = 196), so the surrounding
@@ -954,10 +954,8 @@ pub fn xml_escape(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::card::badges::{Badge, BadgeColor, BadgeId};
-    use crate::commands::card::data::{
-        AppsJailbreakLabel, CardData, HealthTier, StorageBreakdownRows,
-    };
+    use crate::card::badges::{Badge, BadgeColor, BadgeId};
+    use crate::card::data::{AppsJailbreakLabel, CardData, HealthTier, StorageBreakdownRows};
 
     fn richtest_card() -> CardData {
         CardData {
