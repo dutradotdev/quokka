@@ -54,7 +54,7 @@ forensic-adb = "=0.8.1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 async-trait = "0.1"
 # Serializable DTOs — the contract the CLI's `--json` and the GUI consume.
 serde = { version = "1", features = ["derive"] }
