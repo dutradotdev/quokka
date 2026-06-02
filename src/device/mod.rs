@@ -18,6 +18,7 @@ pub mod chip_names;
 pub mod jailbreak;
 pub mod model_names;
 pub mod model_release_years;
+pub mod syslog;
 
 /// Typed device-layer errors. Surfacing these as a real `enum` (instead of
 /// stringly-typed `anyhow` everywhere) lets callers branch on the failure
@@ -1472,7 +1473,7 @@ mod real {
                             }
                         },
                     };
-                    if crate::commands::logs::parser::is_continuation(&raw) {
+                    if super::syslog::is_continuation(&raw) {
                         if let Some(prev) = pending.as_mut() {
                             prev.message.push('\n');
                             prev.message.push_str(raw.trim_end());
@@ -1484,7 +1485,7 @@ mod real {
                             break;
                         }
                     }
-                    pending = Some(crate::commands::logs::parser::parse_syslog_line(&raw));
+                    pending = Some(super::syslog::parse_syslog_line(&raw));
                 }
                 if let Some(entry) = pending.take() {
                     let _ = tx.send(Ok(entry)).await;
