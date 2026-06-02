@@ -320,7 +320,12 @@ pub async fn run() -> Result<()> {
             .await;
     }
 
-    let device = device::connect(cli.udid.as_deref(), cli.platform.map(Into::into)).await?;
+    let device = device::connect(
+        cli.udid.as_deref(),
+        cli.platform.map(Into::into),
+        &crate::ui::select_device,
+    )
+    .await?;
 
     match cli.command {
         None | Some(Command::Devices) | Some(Command::Update { .. }) => {

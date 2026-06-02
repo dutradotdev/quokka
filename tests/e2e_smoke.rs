@@ -7,7 +7,7 @@ use quokka_cli::device;
 
 #[tokio::test]
 async fn connects_to_a_real_device_and_reads_its_status() {
-    let dev = match device::connect(None, None).await {
+    let dev = match device::connect(None, None, &quokka_cli::ui::select_device).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("e2e: skipping — no device available ({e})");

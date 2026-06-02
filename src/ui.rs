@@ -179,6 +179,41 @@ pub fn format_bar(percent: u8, width: usize) -> String {
     s
 }
 
+/// Interactive device picker for the multi-device case — the `DeviceSelector`
+/// the CLI hands to [`crate::device::connect`]. Renders one row per device with
+/// `dialoguer` and returns the chosen index (or `None` on abort). The device
+/// layer keeps no UI dependency and only calls this after confirming stderr is
+/// a TTY.
+pub fn select_device(listings: &[crate::device::DeviceListing]) -> anyhow::Result<Option<usize>> {
+    let items: Vec<String> = listings.iter().map(format_listing_row).collect();
+    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt("Multiple devices connected — pick one")
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .map_err(|e| anyhow::anyhow!("picker failed: {e}"))
+}
+
+/// One-line label for a device in the picker: name, platform, model,
+/// connection, udid. Mirrors the columns `qk devices` prints.
+fn format_listing_row(d: &crate::device::DeviceListing) -> String {
+    let name = d
+        .name
+        .as_deref()
+        .unwrap_or("(untrusted — tap Trust / Allow)");
+    let model = d
+        .model_friendly
+        .as_deref()
+        .or(d.model_identifier.as_deref())
+        .unwrap_or("?");
+    format!(
+        "{name}  ·  {platform}  ·  {model}  ·  {conn}  ·  {udid}",
+        platform = d.platform.label(),
+        conn = d.connection,
+        udid = d.udid,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

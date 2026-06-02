@@ -15,7 +15,13 @@ const LOGCAT_SAMPLE: Duration = Duration::from_secs(2);
 
 #[tokio::test]
 async fn connects_to_a_real_android_and_reads_real_app_sizes() {
-    let dev = match device::connect(None, Some(Platform::Android)).await {
+    let dev = match device::connect(
+        None,
+        Some(Platform::Android),
+        &quokka_cli::ui::select_device,
+    )
+    .await
+    {
         Ok(d) => d,
         Err(e) => {
             eprintln!("e2e-android: skipping — no device available ({e})");

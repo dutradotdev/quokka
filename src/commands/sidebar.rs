@@ -259,7 +259,14 @@ type LoadFuture = Pin<Box<dyn Future<Output = LoadResult>>>;
 /// Connect to one device and read its status. Owns its inputs so it never
 /// borrows the launcher state.
 async fn load_device(listing: DeviceListing) -> LoadResult {
-    let device = device::connect(Some(&listing.udid), Some(listing.platform)).await?;
+    // A sidebar row always names a specific device, so `select` is never
+    // invoked here — but `connect` requires one.
+    let device = device::connect(
+        Some(&listing.udid),
+        Some(listing.platform),
+        &crate::ui::select_device,
+    )
+    .await?;
     let status = device.status().await?;
     Ok((device, status))
 }

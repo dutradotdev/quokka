@@ -18,7 +18,7 @@ use quokka_cli::ui::now_unix;
 
 #[tokio::test]
 async fn card_run_against_real_device_writes_a_1080x1080_png() {
-    let device = device::connect(None, None)
+    let device = device::connect(None, None, &quokka_cli::ui::select_device)
         .await
         .expect("a paired iPhone must be connected for this test");
 

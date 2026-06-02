@@ -566,26 +566,44 @@ impl Platform {
     }
 }
 
+/// Caller-supplied chooser for the interactive multi-device case. The device
+/// layer never opens a picker itself — keeping it free of any UI dependency so
+/// it can move into a presentation-free core. The CLI passes a `dialoguer`-backed
+/// selector; the core only ever invokes it after confirming stderr is a TTY and
+/// that there's a genuine choice to make. Returns the chosen index into
+/// `listings`, or `None` when the user aborts.
+pub type DeviceSelector<'a> = &'a (dyn Fn(&[DeviceListing]) -> Result<Option<usize>> + Send + Sync);
+
 /// Connect to a device.
 ///
 /// With `platform = Some(_)` the matching backend is used directly and keeps
 /// its own single-platform device selection (`udid = Some(_)` targets one,
-/// `None` picks the sole device or opens that backend's picker on a TTY).
+/// `None` picks the sole device or delegates to `select` on a TTY).
 ///
 /// With `platform = None` quokka autodetects across both transports — see
-/// [`autodetect`].
-pub async fn connect(udid: Option<&str>, platform: Option<Platform>) -> Result<Box<dyn Device>> {
+/// [`autodetect`]. `select` is invoked only when 2+ devices are connected and
+/// no explicit target resolves the ambiguity.
+pub async fn connect(
+    udid: Option<&str>,
+    platform: Option<Platform>,
+    select: DeviceSelector<'_>,
+) -> Result<Box<dyn Device>> {
     if let Some(platform) = platform {
-        return connect_to(platform, udid).await;
+        return connect_to(platform, udid, select).await;
     }
-    autodetect(udid).await
+    autodetect(udid, select).await
 }
 
 /// Build the backend for a known platform, targeting `udid` (or the backend's
-/// sole device when `None`).
-async fn connect_to(platform: Platform, udid: Option<&str>) -> Result<Box<dyn Device>> {
+/// sole device when `None`). Only the iOS backend can face multiple devices
+/// behind one transport, so it's the only one handed `select`.
+async fn connect_to(
+    platform: Platform,
+    udid: Option<&str>,
+    select: DeviceSelector<'_>,
+) -> Result<Box<dyn Device>> {
     match platform {
-        Platform::Ios => Ok(Box::new(real::RealDevice::connect(udid).await?)),
+        Platform::Ios => Ok(Box::new(real::RealDevice::connect(udid, select).await?)),
         Platform::Android => Ok(Box::new(android::AndroidDevice::connect(udid).await?)),
     }
 }
@@ -598,17 +616,17 @@ async fn connect_to(platform: Platform, udid: Option<&str>) -> Result<Box<dyn De
 /// platform is resolved from the merged set. Without one, a single device
 /// anywhere is used directly; 2+ open a cross-platform picker on a TTY or
 /// error with a hint otherwise — mirroring each backend's own multi-device rule.
-async fn autodetect(udid: Option<&str>) -> Result<Box<dyn Device>> {
+async fn autodetect(udid: Option<&str>, select: DeviceSelector<'_>) -> Result<Box<dyn Device>> {
     use std::io::IsTerminal;
 
     let (ios, android) = tokio::join!(real::ios_udids(), android::online_serials());
 
     if let Some(want) = udid {
         if ios.iter().any(|u| u == want) {
-            return connect_to(Platform::Ios, Some(want)).await;
+            return connect_to(Platform::Ios, Some(want), select).await;
         }
         if android.iter().any(|u| u == want) {
-            return connect_to(Platform::Android, Some(want)).await;
+            return connect_to(Platform::Android, Some(want), select).await;
         }
         return Err(anyhow!(
             "No device with UDID `{want}` is connected. \
@@ -631,7 +649,7 @@ async fn autodetect(udid: Option<&str>) -> Result<Box<dyn Device>> {
         } else {
             Platform::Android
         };
-        return connect_to(platform, None).await;
+        return connect_to(platform, None, select).await;
     }
     if !std::io::stderr().is_terminal() {
         return Err(anyhow!(
@@ -639,57 +657,23 @@ async fn autodetect(udid: Option<&str>) -> Result<Box<dyn Device>> {
              (or set QK_UDID) to pick one. Run `qk devices` to see names + models."
         ));
     }
-    let chosen = pick_listing_across_platforms().await?;
-    connect_to(chosen.platform, Some(&chosen.udid)).await
+    let chosen = pick_listing_across_platforms(select).await?;
+    connect_to(chosen.platform, Some(&chosen.udid), select).await
 }
 
 /// Full-enumeration cross-platform picker, used when 2+ devices are connected
 /// and stderr is a TTY. Re-reads the enriched listing (names + models) so the
-/// menu is readable, unlike the cheap udid-only scan that gated us here.
-async fn pick_listing_across_platforms() -> Result<DeviceListing> {
+/// caller's `select` renders readable rows, unlike the cheap udid-only scan
+/// that gated us here.
+async fn pick_listing_across_platforms(select: DeviceSelector<'_>) -> Result<DeviceListing> {
     let listings = list_devices().await?;
     if listings.is_empty() {
         return Err(anyhow!(
             "Devices disappeared before selection — re-run the command."
         ));
     }
-    let idx = pick_listing(&listings, "Multiple devices connected — pick one")?
-        .ok_or_else(|| anyhow!("Aborted."))?;
+    let idx = select(&listings)?.ok_or_else(|| anyhow!("Aborted."))?;
     Ok(listings[idx].clone())
-}
-
-/// Present `listings` in an interactive picker, returning the chosen index, or
-/// `None` if the user aborted. Shared by [`autodetect`] and the launcher's
-/// device switcher so both render the device rows identically. Synchronous —
-/// `dialoguer` blocks — which is fine on the interactive picker hot path.
-pub(crate) fn pick_listing(listings: &[DeviceListing], prompt: &str) -> Result<Option<usize>> {
-    let items: Vec<String> = listings.iter().map(format_listing_row).collect();
-    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-        .with_prompt(prompt)
-        .items(&items)
-        .default(0)
-        .interact_opt()
-        .map_err(|e| anyhow!("picker failed: {e}"))
-}
-
-/// One-line label for a device in the cross-platform picker: name, platform,
-/// model, connection, udid. Mirrors the columns `qk devices` prints.
-fn format_listing_row(d: &DeviceListing) -> String {
-    let name = d
-        .name
-        .as_deref()
-        .unwrap_or("(untrusted — tap Trust / Allow)");
-    let model = d
-        .model_friendly
-        .as_deref()
-        .or(d.model_identifier.as_deref())
-        .unwrap_or("?");
-    format!(
-        "{name}  ·  {platform}  ·  {model}  ·  {conn}  ·  {udid}",
-        platform = d.platform.label(),
-        conn = d.connection,
-        udid = d.udid,
-    )
 }
 
 /// One row returned by [`list_devices`].
@@ -1077,7 +1061,10 @@ mod real {
     }
 
     impl RealDevice {
-        pub(super) async fn connect(target_udid: Option<&str>) -> Result<Self> {
+        pub(super) async fn connect(
+            target_udid: Option<&str>,
+            select: DeviceSelector<'_>,
+        ) -> Result<Self> {
             let mut usbmuxd = UsbmuxdConnection::default()
                 .await
                 .map_err(|e| anyhow::Error::from(DeviceError::Usbmuxd(format!("{e:?}"))))?;
@@ -1127,7 +1114,7 @@ mod real {
                 if candidates.len() == 1 {
                     candidates[0].udid.clone()
                 } else if std::io::stderr().is_terminal() {
-                    pick_device_interactively(&candidates).await?.udid.clone()
+                    pick_ios_candidate(&candidates, select).await?.udid.clone()
                 } else {
                     let udids = candidates
                         .iter()
@@ -1165,34 +1152,31 @@ mod real {
         }
     }
 
-    async fn pick_device_interactively<'a>(
+    /// Resolve which of several connected iPhones to use by handing enriched
+    /// listings to the caller's `select`. The device layer builds the data;
+    /// the CLI renders the menu — so this module stays free of any UI crate.
+    async fn pick_ios_candidate<'a>(
         candidates: &'a [&'a idevice::usbmuxd::UsbmuxdDevice],
+        select: DeviceSelector<'_>,
     ) -> Result<&'a idevice::usbmuxd::UsbmuxdDevice> {
-        let listings = enrich_candidates(candidates).await;
-        let items: Vec<String> = candidates
+        let enriched = enrich_candidates(candidates).await;
+        let listings: Vec<DeviceListing> = candidates
             .iter()
-            .zip(listings.iter())
-            .map(|(d, ident)| {
-                let conn = if d.connection_type == Connection::Usb {
+            .zip(enriched.iter())
+            .map(|(d, ident)| DeviceListing {
+                platform: Platform::Ios,
+                udid: d.udid.clone(),
+                connection: if d.connection_type == Connection::Usb {
                     "USB"
                 } else {
                     "Wi-Fi"
-                };
-                let name = ident
-                    .0
-                    .as_deref()
-                    .unwrap_or("(untrusted — tap Trust on the device)");
-                let model = ident.2.as_deref().or(ident.1.as_deref()).unwrap_or("?");
-                format!("{name}  ·  {model}  ·  {conn}  ·  {}", d.udid)
+                },
+                name: ident.0.clone(),
+                model_identifier: ident.1.clone(),
+                model_friendly: ident.2.clone(),
             })
             .collect();
-        let sel = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("Multiple iPhones connected — pick one")
-            .items(&items)
-            .default(0)
-            .interact_opt()
-            .map_err(|e| anyhow!("picker failed: {e}"))?;
-        let idx = sel.ok_or_else(|| anyhow!("Aborted."))?;
+        let idx = select(&listings)?.ok_or_else(|| anyhow!("Aborted."))?;
         Ok(candidates[idx])
     }
 
@@ -2454,7 +2438,14 @@ pub mod bench {
 
     impl Harness {
         pub async fn connect() -> Result<Self> {
-            Ok(Self(real::RealDevice::connect(None).await?))
+            // The benchmark expects exactly one iPhone attached; if usbmuxd
+            // somehow reports several, fail rather than prompt.
+            let select = |_: &[DeviceListing]| -> Result<Option<usize>> {
+                Err(anyhow!(
+                    "bench harness expects exactly one iPhone connected"
+                ))
+            };
+            Ok(Self(real::RealDevice::connect(None, &select).await?))
         }
 
         /// Phase 1 fetch: bundle sizes only, single round-trip. Use this once

@@ -40,14 +40,14 @@ pub async fn run_launcher(udid: Option<&str>, platform: Option<Platform>) -> Res
     // An explicit target picks exactly one device — no enumeration, and the
     // simple single-device menu rather than the multi-device sidebar.
     if udid.is_some() || platform.is_some() {
-        let device = device::connect(udid, platform).await?;
+        let device = device::connect(udid, platform, &crate::ui::select_device).await?;
         return run(&*device).await;
     }
     let listings = device::list_devices().await.unwrap_or_default();
     if listings.is_empty() {
         // Nothing connected anywhere — `connect` surfaces the actionable error
         // (and covers the rare race where a device appears between calls).
-        let device = device::connect(None, None).await?;
+        let device = device::connect(None, None, &crate::ui::select_device).await?;
         return run(&*device).await;
     }
     // The sidebar is the default launcher view for any connected device — a
