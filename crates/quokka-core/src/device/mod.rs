@@ -115,6 +115,12 @@ impl Serialize for DeviceError {
 /// Streaming update from [`Device::with_dynamic_sizes`] — one fires per
 /// batch as the device returns enriched sizes. `apps` carries only the
 /// bundle ids that finished in this batch; `done`/`total` are cumulative.
+///
+/// Serializable like its streaming siblings ([`WalkProgress`], [`LogEntry`])
+/// so a GUI can forward the enrichment payload over IPC verbatim instead of
+/// reprojecting it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchUpdate {
     pub apps: Vec<App>,
     pub done: usize,

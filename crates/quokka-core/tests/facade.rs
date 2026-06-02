@@ -4,31 +4,10 @@
 //! serde round-trips. No iPhone needed — everything runs against `FakeDevice`.
 
 use quokka_core::app;
-use quokka_core::device::{
-    BatchUpdate, DeviceError, DeviceInfo, FakeDevice, MediaFile, WalkProgress,
-};
+use quokka_core::device::{DeviceError, DeviceInfo, FakeDevice, MediaFile};
 
-const NOW: i64 = 1_716_854_400; // 2024-05-28 UTC
-
-fn noop_walk() -> quokka_core::device::WalkCallback {
-    Box::new(|_p: WalkProgress| {})
-}
-
-fn noop_batch() -> quokka_core::device::BatchCallback {
-    Box::new(|_u: BatchUpdate| {})
-}
-
-/// Serialize → deserialize → serialize is a fixed point, pinning the IPC
-/// contract the GUI and `--json` depend on.
-fn assert_round_trips<T>(value: &T)
-where
-    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
-{
-    let json = serde_json::to_string(value).expect("serialize");
-    let back: T = serde_json::from_str(&json).expect("deserialize");
-    let again = serde_json::to_string(&back).expect("re-serialize");
-    assert_eq!(json, again, "round-trip changed the payload");
-}
+mod common;
+use common::{assert_round_trips, noop_batch, noop_walk, NOW};
 
 #[tokio::test]
 async fn status_returns_seeded_snapshot() {
