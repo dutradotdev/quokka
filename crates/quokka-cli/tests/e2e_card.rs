@@ -13,12 +13,13 @@
 use std::path::PathBuf;
 
 use quokka_cli::commands::card;
-use quokka_cli::device;
 use quokka_cli::ui::now_unix;
+
+mod common;
 
 #[tokio::test]
 async fn card_run_against_real_device_writes_a_1080x1080_png() {
-    let device = device::connect(None, None, &quokka_cli::ui::select_device)
+    let device = common::connect()
         .await
         .expect("a paired iPhone must be connected for this test");
 

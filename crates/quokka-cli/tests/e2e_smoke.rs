@@ -3,11 +3,11 @@
 
 #![cfg(feature = "e2e")]
 
-use quokka_cli::device;
+mod common;
 
 #[tokio::test]
 async fn connects_to_a_real_device_and_reads_its_status() {
-    let dev = match device::connect(None, None, &quokka_cli::ui::select_device).await {
+    let dev = match common::connect().await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("e2e: skipping — no device available ({e})");

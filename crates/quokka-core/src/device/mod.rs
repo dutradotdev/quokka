@@ -2439,14 +2439,18 @@ pub mod bench {
 
     impl Harness {
         pub async fn connect() -> Result<Self> {
-            // The benchmark expects exactly one iPhone attached; if usbmuxd
-            // somehow reports several, fail rather than prompt.
+            // Target `QK_UDID` when set (so the bench can pick one iPhone out of
+            // several, matching the `qk` binary); otherwise expect exactly one
+            // attached and fail rather than prompt if usbmuxd reports more.
             let select = |_: &[DeviceListing]| -> Result<Option<usize>> {
                 Err(anyhow!(
-                    "bench harness expects exactly one iPhone connected"
+                    "bench harness expects exactly one iPhone connected (set QK_UDID to disambiguate)"
                 ))
             };
-            Ok(Self(real::RealDevice::connect(None, &select).await?))
+            let target = std::env::var("QK_UDID").ok();
+            Ok(Self(
+                real::RealDevice::connect(target.as_deref(), &select).await?,
+            ))
         }
 
         /// Phase 1 fetch: bundle sizes only, single round-trip. Use this once
