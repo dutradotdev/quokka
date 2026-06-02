@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
-pub mod app;
-pub mod card;
+// The presentation-free core lives in `quokka-core`. Re-export its modules at
+// the historical `quokka_cli::*` / `crate::*` paths so neither the command
+// bodies (which reach `crate::device`, `crate::app`, `crate::logic`,
+// `crate::card`, `crate::fmt`) nor the integration tests (`quokka_cli::device`,
+// `quokka_cli::app`, …) need to change after the workspace split.
+pub use quokka_core::{app, card, device, fmt, logic};
+
 pub mod commands;
-pub mod device;
-pub mod fmt;
-pub mod logic;
 pub mod ui;
 
 use crate::device::LogLevel;

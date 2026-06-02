@@ -1,0 +1,94 @@
+[package]
+name = "quokka-cli"
+version = "0.2.5"
+edition = "2021"
+description = "CLI to inspect and tidy an iPhone connected over USB to a Mac."
+license = "MIT"
+repository = "https://github.com/dutradotdev/quokka"
+homepage = "https://github.com/dutradotdev/quokka"
+readme = "../../README.md"
+keywords = ["ios", "iphone", "cli", "idevice", "usbmuxd"]
+categories = ["command-line-utilities"]
+# Disable bin auto-discovery so we control both `quokka` and `qk` explicitly.
+autobins = false
+# Distribution is via Homebrew and the curl installer (see release.yml);
+# nothing here is a library people should depend on. Setting publish to
+# false keeps `FakeDevice`, the `Device` trait, and `pub mod bench` from
+# becoming a de-facto stable API via `cargo install quokka-cli`.
+#
+# `cargo-dist` interprets `publish = false` as "skip this package", which
+# breaks the release pipeline. The override below tells dist to keep
+# building binaries for it.
+publish = false
+
+[package.metadata.dist]
+dist = true
+
+[lib]
+name = "quokka_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "quokka"
+path = "src/bin/quokka.rs"
+
+[[bin]]
+name = "qk"
+path = "src/bin/qk.rs"
+
+[features]
+default = []
+# Enables tests that require a real iPhone connected via USB. Not run in CI.
+# Forwards to the core so the device layer's real-device helpers
+# (`device::bench`) compile.
+e2e = ["quokka-core/e2e"]
+# Enables tests that require a real Android device over adb. Not run in CI
+# (CI only compile-checks it, same as `e2e`).
+e2e-android = ["quokka-core/e2e-android"]
+
+[dependencies]
+# The presentation-free core: Device seam, app facade, pure logic/format/card.
+quokka-core = { path = "../quokka-core" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+# `--json` serializes the core DTOs; the dispatch bounds on `serde::Serialize`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `FuturesUnordered` for bounded-concurrency batched lookups (apps, capture).
+futures = "0.3"
+
+# UX libs — chosen once here so every command stays consistent.
+# anstream auto-detects TTY and strips ANSI when piped; owo-colors composes on top.
+owo-colors = { version = "4", features = ["supports-colors"] }
+anstream = "0.6"
+indicatif = "0.17"
+# Confirm prompt after TUI selection. MultiSelect was replaced by the
+# ratatui-based picker (live size updates during Phase 2 enrichment).
+dialoguer = { version = "0.11", default-features = false }
+# Live-updating multi-select TUI for `qk apps` — items render with static
+# sizes immediately, then refresh as Phase 2 enrichment streams in.
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream"] }
+# Redirect the process stderr fd to /dev/null while the multi-device sidebar
+# owns the alt screen, so best-effort `eprintln!` warnings from the device layer
+# (AFC skips, enrichment failures) can't scribble over the ratatui frame. Only
+# `dup`/`dup2`/`open` on our own stderr — no other libc surface is used.
+libc = "0.2"
+# Pure-Rust packet parser (Ethernet / IPv4 / IPv6 / TCP / UDP / ICMP). No C deps.
+etherparse = "0.20"
+# pcap / pcapng read+write. We use the write side (`--save`) — pcapng lets us
+# attach per-packet comments which is how we smuggle pid/comm into Wireshark.
+pcap-file = "2.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# Inline snapshots for render functions — locks in the printed layout so
+# accidental column-width or row-order changes fail loudly.
+insta = "1"
+# Temp files for capture-writer roundtrip tests (write a packet, read it back).
+tempfile = "3"
+# Property testing for the tolerant capture packet parser. The invariant under
+# test is "arbitrary input never panics".
+proptest = "1"
