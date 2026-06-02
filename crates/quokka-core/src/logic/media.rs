@@ -77,8 +77,8 @@ pub struct MediaReport {
     pub total_bytes: u64,
     pub device_name: Option<String>,
     /// Display label for the roots that were walked, derived from them. The
-    /// report owns it so [`crate::commands::media::render`] stays free of
-    /// platform path assumptions.
+    /// report owns it so the CLI's `media` renderer stays free of platform
+    /// path assumptions.
     pub roots_label: String,
     pub by_kind: [(Kind, usize, u64); 4],
     pub by_month: Vec<(YearMonth, usize, u64)>,

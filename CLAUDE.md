@@ -8,6 +8,10 @@ The contributor-facing docs cover the same ground for humans: `README.md`
 
 ## Build & test
 
+quokka is a Cargo **workspace** (`quokka-core` + `quokka-cli`, under
+`crates/`). All commands run from the repo root and resolve across the whole
+workspace.
+
 ```sh
 cargo build
 cargo test                  # unit + integration tests, no iPhone needed
@@ -17,9 +21,10 @@ cargo run --bin quokka -- status
 cargo run --bin qk -- status        # short alias, same binary content
 cargo test --test <name>            # run a single integration test file
 cargo test -- <substring>           # filter by test name substring
+cargo test -p quokka-core           # just the core crate (facade + pure logic)
 ```
 
-A `PostToolUse` hook in `.claude/settings.json` runs `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test` automatically after any Edit/Write/MultiEdit that touches `src/**/*.rs`, `tests/**/*.rs`, or `Cargo.toml`. Failures come back as blocking hook output — fix them before continuing. You normally do **not** need to invoke fmt / clippy / test manually after editing Rust files.
+A `PostToolUse` hook in `.claude/settings.json` runs `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test` automatically after any Edit/Write/MultiEdit that touches `crates/**/*.rs`, `crates/**/Cargo.toml`, or the root `Cargo.toml`. Failures come back as blocking hook output — fix them before continuing. You normally do **not** need to invoke fmt / clippy / test manually after editing Rust files. The hook does **not** use the `e2e` features — validate those by hand: `cargo clippy --all-targets --features e2e,e2e-android`.
 
 The same three checks run in CI (`.github/workflows/ci.yml`) on every push and pull request to `main`, so a regression fails before it can merge. The `e2e` tests are compile-checked in CI but never executed there.
 
@@ -27,7 +32,30 @@ The repo pins `stable` via `rust-toolchain.toml` (the system default may be olde
 
 ## Architecture
 
-**The `Device` trait in `src/device/mod.rs` is the seam that makes the whole project testable — and platform-agnostic.** Every device operation, iPhone **or** Android, goes through this trait. The iOS implementation lives in a private `mod real` submodule talking to the [`idevice`](https://github.com/jkcoxson/idevice) crate; the Android implementation in `mod android` talking to a local `adb` server via [`forensic-adb`](https://crates.io/crates/forensic-adb); tests use the in-module `FakeDevice`. **No `idevice` *or* `forensic_adb` type may be exposed through the public surface of `device/mod.rs`** — both crates ship breaking changes pre-1.0, and the seam exists to absorb them. (`forensic-adb` was chosen over `adb_client`: the latter pulls in `rsa`, which carries the unpatched RUSTSEC-2023-0071 advisory. Server-mode adb lets the daemon do device auth, so no client-side RSA is needed and the tree stays crypto-free.) Commands consume the trait and quokka's own neutral types only; **no command may branch on platform** (`if ios` / `if android`). If a command needs to know the platform, the trait leaked — fix the trait, not the command. Capabilities that exist on one platform only (packet capture is iOS-only) are exposed as a separate extension trait (`CaptureCapable`) reached via `Device::as_capture()`, not a platform check.
+The repo is a Cargo workspace with two crates. **`quokka-core`** (lib
+`quokka_core`, `crates/quokka-core/`) is presentation-free: the `Device` seam,
+the application facade (`app`), and the pure projection/format logic (`fmt`,
+`logic`, `card`) — plus `assets/`. It carries the `=idevice` / `=forensic-adb`
+pins and the SVG→PNG stack. **`quokka-cli`** (lib `quokka_cli`, bins
+`quokka`/`qk`, `crates/quokka-cli/`) is everything terminal-shaped: clap
+dispatch, the command modules, the ratatui TUIs, and the terminal helpers in
+`ui`. The CLI depends on the core and re-exports `quokka_core::{app, card,
+device, fmt, logic}` at its crate root, so command bodies keep using
+`crate::device` / `crate::app` / `crate::logic` / `crate::card` / `crate::fmt`
+and tests keep using `quokka_cli::*` unchanged. **Rule of thumb:** data,
+decisions, and projections live in `quokka-core`; anything touching a terminal,
+`ratatui`, `dialoguer`, `clap`, or writing files lives in `quokka-cli`. The
+core must never reference `crate::commands` or `crate::ui`.
+
+The **facade** (`quokka_core::app`) is one async fn per operation
+(`status`, `info`, `apps`, `analyze`, `media`, `delete_files`, `card`, `reboot`,
+`shutdown`, `stream_logs`), each returning a serializable DTO and `DeviceError`.
+The CLI renders these; `--json` prints them; the GUI wraps each in a one-line
+command. `run()` dispatches `--json` generically for the one-shot query commands
+(`status`/`info`/`apps`/`analyze`/`media`/`devices`); `logs --json` streams
+NDJSON; `card`/`capture` stay out of `--json`.
+
+**The `Device` trait in `crates/quokka-core/src/device/mod.rs` is the seam that makes the whole project testable — and platform-agnostic.** Every device operation, iPhone **or** Android, goes through this trait. The iOS implementation lives in a private `mod real` submodule talking to the [`idevice`](https://github.com/jkcoxson/idevice) crate; the Android implementation in `mod android` talking to a local `adb` server via [`forensic-adb`](https://crates.io/crates/forensic-adb); tests use the in-module `FakeDevice`. **No `idevice` *or* `forensic_adb` type may be exposed through the public surface of `device/mod.rs`** — both crates ship breaking changes pre-1.0, and the seam exists to absorb them. (`forensic-adb` was chosen over `adb_client`: the latter pulls in `rsa`, which carries the unpatched RUSTSEC-2023-0071 advisory. Server-mode adb lets the daemon do device auth, so no client-side RSA is needed and the tree stays crypto-free.) Commands consume the trait and quokka's own neutral types only; **no command may branch on platform** (`if ios` / `if android`). If a command needs to know the platform, the trait leaked — fix the trait, not the command. Capabilities that exist on one platform only (packet capture is iOS-only) are exposed as a separate extension trait (`CaptureCapable`) reached via `Device::as_capture()`, not a platform check.
 
 When adding a capability (e.g. battery, app list, AFC walk), add a method to the `Device` trait and implement it in **both** `mod real` and `mod android` (Android degrades unavailable data to `None`/empty rather than failing). Commands consume the trait, not `idevice`/`forensic_adb` directly.
 
@@ -35,11 +63,11 @@ Both backend crates are pinned with `=` (idevice `=0.1.x`, forensic-adb `=0.8.x`
 
 ### Two binaries, one entry point
 
-`src/lib.rs` exports `run()`. Both `src/bin/quokka.rs` and `src/bin/qk.rs` are thin shims that call it — they are intentionally identical. `qk` is the short alias. Integration tests in `tests/` go through the lib (not by spawning the binary).
+`crates/quokka-cli/src/lib.rs` exports `run()`. Both `src/bin/quokka.rs` and `src/bin/qk.rs` (under `quokka-cli`) are thin shims that call it — they are intentionally identical. `qk` is the short alias. Integration tests in `crates/quokka-cli/tests/` go through the lib (not by spawning the binary); facade tests live in `crates/quokka-core/tests/`.
 
 ### Command structure
 
-`run()` parses with clap. Every subcommand connects once (`device::connect()`) and dispatches to `commands::{status,apps,analyze,…}::run(&*device, ...)`. The bare `quokka`/`qk` launcher is the exception — it owns its own device selection (so it can switch between connected devices), so `lib.rs` routes a no-subcommand TTY invocation to `commands::menu::run_launcher(udid, platform)` *before* the shared connect. The dispatch lives in `src/lib.rs`; per-command logic in `src/commands/`. `commands::dashboard` is not a dispatch target — it is the pure dashboard renderer reused by `status` and `menu`. UI helpers (byte formatting, blocks, progress bars) are centralized in `src/ui.rs` so every command renders consistently.
+`run()` parses with clap. Every subcommand connects once (`device::connect()`) and dispatches to `commands::{status,apps,analyze,…}::run(&*device, ...)`. The bare `quokka`/`qk` launcher is the exception — it owns its own device selection (so it can switch between connected devices), so `lib.rs` routes a no-subcommand TTY invocation to `commands::menu::run_launcher(udid, platform)` *before* the shared connect. The dispatch lives in `crates/quokka-cli/src/lib.rs`; per-command logic in `crates/quokka-cli/src/commands/`. `commands::dashboard` is not a dispatch target — it is the pure dashboard renderer reused by `status` and `menu`. Terminal helpers (spinners, progress bars, TTY detection, the device picker) live in `crates/quokka-cli/src/ui.rs`; the pure value formatters live in `quokka_core::fmt` and are re-exported through `ui` so call sites keep one `crate::ui::*` path.
 
 `device::connect(udid, platform)` **autodetects across iOS (usbmuxd) and Android (adb)** when `--platform` is not forced: it cheaply enumerates both transports (best-effort — a missing `adb` or usbmuxd contributes zero devices, never an error), resolves an explicit `--udid` to its owning platform, uses a sole device directly, and on 2+ opens a cross-platform picker (TTY) or errors (non-TTY). `device::list_devices()` returns the same two transports merged (each `DeviceListing` carries its `platform`) for `qk devices`.
 
@@ -49,14 +77,15 @@ When the sidebar launches an action it tears its terminal down completely (drops
 
 ### Test layers
 
-1. **Unit tests** (`#[cfg(test)]` next to the code) — pure logic, no hardware, no fake.
-2. **Integration tests** in `tests/integration.rs` — exercise commands against `FakeDevice`. The fake is what makes these possible without an iPhone.
-3. **E2E tests** in `tests/e2e_*.rs` behind `--features e2e` — drive the real `idevice` backend (`RealDevice`) against a physical iPhone over USB, through the same library entry points as the integration tests. **Never run in CI** — CI only compile-checks them.
-4. **Android E2E** in `tests/e2e_android.rs` behind `--features e2e-android` — drives the real `AndroidDevice` backend against a physical Android device over `adb`, through the same library entry point. Asserts at least one app reports a non-zero `dumpsys diskstats` size. Skips gracefully when no device is attached. **Never run in CI** — CI only compile-checks it.
+1. **Unit tests** (`#[cfg(test)]` next to the code, in both crates) — pure logic, no hardware, no fake.
+2. **Facade tests** in `crates/quokka-core/tests/facade.rs` — call `app::*` against `FakeDevice` and assert on the returned DTOs + serde round-trips. Independent of the CLI.
+3. **Integration tests** in `crates/quokka-cli/tests/integration.rs` — exercise commands (rendering) against `FakeDevice`. The fake is what makes these possible without an iPhone.
+4. **E2E tests** in `crates/quokka-cli/tests/e2e_*.rs` behind `--features e2e` — drive the real `idevice` backend (`RealDevice`) against a physical iPhone over USB, through the same library entry points as the integration tests. **Never run in CI** — CI only compile-checks them.
+5. **Android E2E** in `crates/quokka-cli/tests/e2e_android.rs` behind `--features e2e-android` — drives the real `AndroidDevice` backend against a physical Android device over `adb`, through the same library entry point. Asserts at least one app reports a non-zero `dumpsys diskstats` size. Skips gracefully when no device is attached. **Never run in CI** — CI only compile-checks it.
 
-Cross-cutting tools layered on top of 1–2:
-- **Property tests** (`proptest`, a dev-dep) live next to the tolerant parsers (`commands/capture/parser.rs`, `device/android.rs`). The invariant is "arbitrary input never panics" — the executable form of the tolerant-parsing-not-per-OEM-branching rule. Add one whenever you add or change a parser.
-- **Snapshot tests** (`insta`, a dev-dep) lock in deterministic rendered output (dashboard, `card` SVG, `ui.rs` formatters, `--json`). Review changes with `cargo insta review`.
+Cross-cutting tools layered on top of 1–3:
+- **Property tests** (`proptest`, a dev-dep) live next to the tolerant parsers (`quokka-cli` `commands/capture/parser.rs`, `quokka-core` `device/android.rs`). The invariant is "arbitrary input never panics" — the executable form of the tolerant-parsing-not-per-OEM-branching rule. Add one whenever you add or change a parser.
+- **Snapshot tests** (`insta`, a dev-dep) lock in deterministic rendered output (dashboard, `card` SVG, `fmt` formatters, `--json`). Review changes with `cargo insta review`.
 
 5. **Real-device E2E via tmux** — the `/qa` layer in `tests/llm/`, driven by Claude Code (skill at `.claude/skills/qa/SKILL.md`, mechanics in `tests/llm/lib/drive.sh`). Runs the real binary against an attached iPhone/Android through `tmux`, covering interactive TUIs and real-hardware behavior. Verification is **deterministic** (exit code / regex / golden frame) — no LLM judge. **Not run in CI** (needs a device); it is a pre-release checklist step. Requires `tmux`. See `tests/llm/README.md`.
 6. **Exploratory LLM pass** — advisory only, never a gate (the optional tail of the `/qa` skill).

@@ -6,32 +6,68 @@ the rule the rest of the codebase is shaped around.
 
 ## The big picture
 
-quokka is a command-line tool. A run looks like this:
+quokka is a Cargo **workspace** with two crates:
+
+- **`quokka-core`** (lib `quokka_core`, `crates/quokka-core/`) — the
+  presentation-free heart: the `Device` seam (trait + iOS/Android/fake
+  backends + neutral types), the application **facade** (`app`), and the pure
+  projection/format logic (`fmt`, `logic`, `card`). Nothing here knows about
+  terminals, `clap`, or Tauri. This is the crate the (future) GUI depends on.
+- **`quokka-cli`** (lib `quokka_cli`, bins `quokka`/`qk`,
+  `crates/quokka-cli/`) — everything terminal-shaped: `clap` parsing/dispatch,
+  the per-command modules, the `ratatui` TUIs, and the terminal helpers in
+  `ui`. It depends on `quokka-core` and re-exports its modules at the
+  historical `quokka_cli::{app, card, device, fmt, logic}` paths.
+
+A CLI run looks like this:
 
 ```text
-quokka.rs / qk.rs   →   lib.rs::run()   →   device::connect()   →   commands::*::run()
-   (thin shim)          (parse + dispatch)   (one connection)      (per-command logic)
+quokka.rs / qk.rs   →   lib.rs::run()   →   device::connect()   →   app::*  →  commands::*::run()
+   (thin shim)          (parse + dispatch)   (one connection)     (facade)    (render the DTO)
 ```
 
-1. **`src/bin/quokka.rs` and `src/bin/qk.rs`** are four-line shims. They exist
-   only so the tool can be invoked under two names. They both call `run()`.
-2. **`src/lib.rs`** owns `run()`. It parses arguments with `clap`, connects to
-   the device **once**, then dispatches to the matching command module. All
-   integration tests go through the library, never by spawning the binary.
-3. **`src/device/mod.rs`** is the boundary with the iPhone (see below).
-4. **`src/commands/`** holds one module per command. Commands receive a
-   `&dyn Device` — they never see the iPhone directly.
-5. **`src/ui.rs`** centralises terminal output helpers (byte formatting,
-   progress bars, spinners) so every command renders consistently.
+1. **`crates/quokka-cli/src/bin/{quokka,qk}.rs`** are four-line shims. They
+   exist only so the tool can be invoked under two names. They both call `run()`.
+2. **`crates/quokka-cli/src/lib.rs`** owns `run()`. It parses arguments with
+   `clap`, connects to the device **once**, then either prints the facade DTO
+   as JSON (`--json`) or dispatches to the matching command module to render
+   it. All integration tests go through the library, never by spawning the binary.
+3. **`crates/quokka-core/src/device/mod.rs`** is the boundary with the device
+   (see below).
+4. **`crates/quokka-core/src/app/`** is the facade: one async function per
+   operation, each returning a serializable DTO and `DeviceError`. The CLI,
+   `--json`, and the GUI all consume it.
+5. **`crates/quokka-cli/src/commands/`** holds one module per command. Commands
+   call the facade (or the trait) and render — they never see the device crate
+   types directly leak any backend.
+6. **`crates/quokka-cli/src/ui.rs`** centralises terminal helpers (spinners,
+   progress bars, TTY detection, the device picker); the pure value formatters
+   live in `quokka_core::fmt` and are re-exported through `ui`.
 
 Because `run()` lives in the library and commands take a trait object, the
-whole tool can be driven in a test without a binary, a terminal, or an iPhone.
+whole tool can be driven in a test without a binary, a terminal, or a device.
+
+## The facade and `--json`
+
+`quokka_core::app` is a surface-agnostic API: `app::status`, `app::info`,
+`app::apps`, `app::analyze`, `app::media`, `app::delete_files`, `app::card`,
+`app::reboot`, `app::shutdown`, `app::stream_logs`. Each drives the `Device`
+trait plus the pure logic and returns a serializable DTO (or a `Receiver` of
+DTOs, for streaming `logs`), surfacing failures as a serializable `DeviceError`
+(`{ kind, message }`).
+
+`run()` dispatches generically over this: for the one-shot query commands
+(`status`, `info`, `apps`, `analyze`, `media`, `devices`), `--json` prints
+`serde_json` of the DTO and the plain path renders it. `logs --json` streams
+NDJSON, one line per `LogEntry`. `card` and `capture` stay out of `--json`
+(image / TUI). The GUI wraps each `app::*` function in a one-line command — the
+DTOs, parsing, and card render all come ready from the core.
 
 ## The `Device` seam
 
-**Every operation quokka performs on an iPhone goes through the `Device` trait
-in `src/device/mod.rs`.** This is the single most important design decision in
-the project.
+**Every operation quokka performs on a device — iPhone or Android — goes
+through the `Device` trait in `crates/quokka-core/src/device/mod.rs`.** This is
+the single most important design decision in the project.
 
 ```rust
 #[async_trait]
@@ -50,8 +86,11 @@ There are two implementations:
 
 - **`RealDevice`**, in a private `mod real` submodule, talks to the
   [`idevice`](https://github.com/jkcoxson/idevice) crate over `usbmuxd`.
+- **`AndroidDevice`**, in a `mod android` submodule, talks to a local `adb`
+  server via [`forensic-adb`](https://crates.io/crates/forensic-adb).
 - **`FakeDevice`** is an in-memory implementation used by tests. It is `pub` so
-  the integration tests in `tests/` can construct it; production code never does.
+  the integration tests (`crates/quokka-cli/tests/`, `quokka-core/tests/`) can
+  construct it; production code never does.
 
 ### Why the seam exists
 
@@ -62,7 +101,8 @@ point release until 0.2.0**. The seam isolates that churn:
   The trait deals only in quokka's own types (`DeviceStatus`, `App`,
   `MediaFile`, …). When `idevice` breaks, the damage is contained to
   `mod real` — the trait and everything above it stay still.
-- The dependency is pinned with `=0.1.x` in `Cargo.toml` for the same reason.
+- The dependency is pinned with `=0.1.x` in `quokka-core/Cargo.toml` (alongside
+  the `=0.8.x` `forensic-adb` pin) for the same reason.
 - Because commands depend on the *trait*, not the crate, every command is
   testable against `FakeDevice` with zero hardware.
 
@@ -80,7 +120,7 @@ If step 4 needs an `idevice` type, the seam has leaked — fix the trait instead
 
 ## Commands
 
-Each file in `src/commands/` is one command and exposes an
+Each file in `crates/quokka-cli/src/commands/` is one command and exposes an
 `async fn run(device: &dyn Device, …)`:
 
 - **`status.rs`** — fetches a `DeviceStatus` and prints the dashboard once.
@@ -95,16 +135,18 @@ Each file in `src/commands/` is one command and exposes an
   unit-testable. Shared by `status` and the launcher.
 - **`menu.rs`** — the interactive launcher shown when `quokka` is run with no
   subcommand on a TTY.
-- **`card/`** — `qk card` renders a 1080×1080 PNG snapshot of the device for
-  social sharing. The pipeline has four pure layers and one IO layer:
-  `data.rs` projects `DeviceStatus + now → CardData` (all time-derived
-  values are pre-formatted strings, so the renderer is deterministic);
-  `badges.rs` evaluates 15 eligibility checks and ranks the top 3;
-  `render.rs` is a pure `fn render_svg(&CardData) -> String`; `png.rs`
-  rasterises via `resvg` with JetBrains Mono embedded via `include_bytes!`
-  and registered in `usvg::Options::fontdb`; `share.rs` formats the Twitter
-  intent URL. `mod.rs` is the only layer that touches the filesystem and
-  spawns `open` for Preview.
+- **`card.rs`** — `qk card` renders a 1080×1080 PNG snapshot of the device for
+  social sharing. The pure layers live in the core
+  (`crates/quokka-core/src/card/`): `data.rs` projects
+  `DeviceStatus + now → CardData` (all time-derived values are pre-formatted
+  strings, so the renderer is deterministic); `badges.rs` evaluates 15
+  eligibility checks and ranks the top 3; `render.rs` is a pure
+  `fn render_svg(&CardData) -> String`; `png.rs` rasterises via `resvg` with
+  JetBrains Mono embedded via `include_bytes!` and registered in
+  `usvg::Options::fontdb`; `share.rs` formats the Twitter intent URL. The CLI's
+  `commands/card.rs` is the only layer that touches the filesystem and spawns
+  `open` for Preview; the facade's `app::card` returns the rendered bytes
+  directly for the GUI.
 
 `apps` and `analyze` are the only commands with an interactive TUI; `card`
 writes a PNG and exits; everything else prints a plain block of output.
@@ -126,11 +168,12 @@ These are enforced by the shared helpers in `ui.rs` and by `anstream` /
 
 ## Test layers
 
-| Layer           | Location                        | Needs an iPhone? | Runs in CI? |
-| --------------- | ------------------------------- | ---------------- | ----------- |
-| Unit            | `#[cfg(test)]` next to the code | No               | Yes         |
-| Integration     | `tests/integration.rs`          | No (uses fake)   | Yes         |
-| End-to-end      | `tests/e2e_*.rs` (`e2e` feature)| Yes              | No          |
+| Layer            | Location                                       | Needs a device?  | Runs in CI? |
+| ---------------- | ---------------------------------------------- | ---------------- | ----------- |
+| Unit             | `#[cfg(test)]` next to the code (both crates)  | No               | Yes         |
+| Facade           | `crates/quokka-core/tests/facade.rs`           | No (uses fake)   | Yes         |
+| Integration      | `crates/quokka-cli/tests/integration.rs`       | No (uses fake)   | Yes         |
+| End-to-end       | `crates/quokka-cli/tests/e2e_*.rs` (`e2e` / `e2e-android`) | Yes  | No          |
 
 The first two layers are the **regression net**: they pin the current
 behaviour so a future change that breaks it fails CI before it can merge.

@@ -13,12 +13,14 @@ use owo_colors::OwoColorize;
 use crate::device::Device;
 use crate::ui::{civil_from_unix, spinner};
 
-// The pure card layers (projection, badges, SVG render, PNG raster, share URL,
-// emoji) moved to the core (`crate::card`). Re-export them at the historical
-// `commands::card::*` paths so this module's `run` keeps calling `data::`,
-// `render::`, `png::`, `share::` unchanged, and tests/examples that reach
-// `commands::card::{data, render, png, …}` keep resolving.
-pub use crate::card::{badges, data, emoji, png, render, share};
+// The pure card layers (projection, badges, SVG render, PNG raster, share URL)
+// moved to the core (`crate::card`). Re-export the ones the CLI surface reaches
+// at the historical `commands::card::*` paths so this module's `run` keeps
+// calling `data::`, `render::`, `png::`, `share::` unchanged, and the example /
+// integration tests that reach `commands::card::{badges, data, render, png}`
+// keep resolving. (`emoji` is reached only inside the core renderer — consumers
+// use `quokka_core::card::emoji` directly, so it isn't re-exported here.)
+pub use crate::card::{badges, data, png, render, share};
 
 /// CLI arguments wired from clap in `src/lib.rs`.
 #[derive(Debug, Clone)]

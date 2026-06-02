@@ -166,22 +166,35 @@ Prompt sugerido para retomar:
 - **Passo 1** — concluído (`d30d2cc`). `DeviceError`/`CardData` serializáveis.
 - **Passo 2** — concluído (`fa6ecaa`). Facade `app::*`, DTOs, `app::redact`.
 - **Passo 3** — concluído (`8039e0f`). `--json` genérico + NDJSON em `logs`.
-- **Passo 4** — **em andamento**. Sub-passos concluídos:
+- **Passo 4** — **concluído**. Sub-passos:
   - **4a** (`5f2c2b1`) — `device::connect` livre de apresentação: picker extraído
     para a CLI via callback `DeviceSelector` (`ui::select_device`). `dialoguer`
     saiu do `device/`.
   - **4b** (`c616ba1`) — parser de syslog movido para `device::syslog`. O
-    `device/` não referencia mais nenhum módulo de comando — está autocontido e
-    pronto para virar `quokka-core`.
-  - **Restante (4c–4e)** — extrair a lógica pura que o `app` consome
-    (`commands::card::{data,badges,render,png,share,emoji}`, `commands::analyze`
-    heurísticos/`sort_by_size`/`ext_lower`/`kind_from_ext`, `commands::media`
-    agregações + `MediaReport` + `top_n_by_size`, e os formatadores puros +
-    `now_unix` de `ui.rs`) para módulos do core; criar o workspace
-    `quokka-core`+`quokka-cli` (truque de re-export para não reescrever os
-    call sites); mover testes (`FakeDevice`/facade → core) e atualizar docs.
-    A decisão do picker (4a) era o único bloqueador de design; o resto é
-    extração mecânica.
+    `device/` não referencia mais nenhum módulo de comando — autocontido.
+  - **4c** (`8f35cd9`) — lógica pura fatiada em módulos core-shaped no crate
+    único: `src/fmt.rs` (formatadores + `now_unix`), `src/logic/{mod,analyze,
+    media}.rs` (`top_n_by_size`, heurísticos, agregações + `MediaReport`),
+    `src/card/` (as 6 camadas puras). Os comandos mantêm `run`/render/TUI e
+    re-exportam os símbolos puros nos caminhos antigos; `app`/`card::data`
+    repontados para `crate::{logic,card,fmt}`. `device`+`app`+`fmt`+`logic`+
+    `card` viram uma ilha sem `crate::commands`/`crate::ui`.
+  - **4d** (`eeb91a0`) — workspace `crates/quokka-core` + `crates/quokka-cli`.
+    Core = device+app+fmt+logic+card+assets (+ pins `=idevice`/`=forensic-adb`
+    + stack SVG→PNG); CLI = bins+lib+commands+ui, depende do core e re-exporta
+    `quokka_core::{app,card,device,fmt,logic}` na raiz (diff = só git mv +
+    swap de re-export no lib.rs + Cargo.tomls). Features `e2e`/`e2e-android`
+    encaminham CLI→core (`device::bench`).
+  - **4e** — testes do facade movidos para `crates/quokka-core/tests/facade.rs`
+    (sem duplicar fixtures); `tests/llm` voltou para a raiz (não é alvo cargo);
+    docs (`ARCHITECTURE.md`, `CLAUDE.md`, `README`) atualizadas para workspace +
+    facade + `--json`. Total verde: 353 unit (218 cli + 135 core) + 51
+    integração (43 cli + 8 core facade) = 404; clippy limpo incl.
+    `--features e2e,e2e-android`.
+
+  Pendência fora do meu alcance: o matcher do hook `PostToolUse` em
+  `.claude/settings.json` ainda casa `src/**`/`tests/**`; precisa virar
+  `crates/**` (a edição foi bloqueada pelo classifier — decisão do Lucas).
 
 Desvios assumidos nos Passos 1–3 (sinalizados para revisão):
 

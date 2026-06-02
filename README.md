@@ -81,7 +81,16 @@ qk shutdown --yes                      # non-interactive
 qk card                                # render a 1080x1080 PNG to ~/Desktop and open in Preview
 qk card --output ~/Pictures/me.png     # custom output path
 qk card --no-open --redact             # don't open Preview, mask anything personal
+
+qk status --json                       # machine-readable output (also: info/apps/analyze/media/devices)
+qk info --redact --json | jq .         # redaction applies before serialization
+qk logs --json                         # NDJSON stream, one JSON object per log line
 ```
+
+Every query command takes `--json`: it prints the same data the GUI consumes,
+so you can pipe quokka into `jq` or another tool. `logs --json` streams NDJSON
+(one object per line); `card` (an image) and `capture` (a live TUI) stay out of
+`--json`.
 
 ## Picking a platform and device
 
@@ -159,7 +168,7 @@ If you already have a Rust toolchain:
 ```sh
 cargo install --git https://github.com/dutradotdev/quokka quokka-cli
 # or, from a local clone:
-cargo install --path .
+cargo install --path crates/quokka-cli
 ```
 
 Slower because it compiles locally. Use this when you want to track `main`
@@ -179,6 +188,12 @@ cargo test --features e2e-android   # adds tests that need a real Android over a
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
+
+quokka is a Cargo workspace with two crates: **`quokka-core`** (the
+presentation-free `Device` seam, the application facade, and the pure
+projection/format logic — the crate a GUI would depend on) and **`quokka-cli`**
+(the `quokka`/`qk` binaries and all terminal UI). All `cargo` commands run from
+the repo root and span the workspace.
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to set up, test, and submit a change.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how quokka is put together and why.
