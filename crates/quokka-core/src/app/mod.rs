@@ -13,6 +13,8 @@
 
 pub mod redact;
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
 
@@ -20,7 +22,7 @@ use crate::card::data::{self, CardData};
 use crate::card::{png, render};
 use crate::device::{
     App, BatchCallback, Device, DeviceError, DeviceInfo, DeviceStatus, LogEntry, MediaFile,
-    WalkCallback,
+    PullCallback, WalkCallback,
 };
 use crate::logic::{analyze, media};
 
@@ -180,6 +182,41 @@ pub async fn delete_files(
         }
     }
     Ok(outcome)
+}
+
+/// Copy `remote` (an absolute device media path, the same space `analyze` /
+/// `media` walk) to the local `dest`, streaming in bounded chunks. `on_progress`
+/// fires after each chunk with the running byte count, so a UI can divide it
+/// against the size it already has from the walk. The GUI maps one Tauri command
+/// to this so it can open a media file locally before deleting it.
+pub async fn pull_file(
+    device: &dyn Device,
+    remote: &str,
+    dest: &Path,
+    on_progress: PullCallback,
+) -> Result<(), DeviceError> {
+    device
+        .pull_file(remote, dest, on_progress)
+        .await
+        .map_err(to_device_error)
+}
+
+/// Read the byte window `[offset, offset + len)` from `remote` (an absolute
+/// device media path) and return it. Bounded by `len`, so the result fits in
+/// memory; a window past EOF returns fewer bytes (or none), never an error. The
+/// GUI maps one Tauri command to this and serves browser `Range` requests by
+/// looping over windows — letting a video start playing before the whole file
+/// has transferred.
+pub async fn read_range(
+    device: &dyn Device,
+    remote: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, DeviceError> {
+    device
+        .read_range(remote, offset, len)
+        .await
+        .map_err(to_device_error)
 }
 
 /// A fully rendered share card: the projected data, the SVG, and the rasterized

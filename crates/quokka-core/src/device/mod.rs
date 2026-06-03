@@ -6,6 +6,8 @@
 //! rest of the codebase does not depend on `idevice`'s still-evolving API
 //! (the crate ships breaking changes at every point release until 0.2.0).
 
+use std::path::Path;
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::ser::SerializeStruct;
@@ -151,6 +153,20 @@ pub struct WalkProgress {
 
 /// Periodic progress callback for [`Device::afc_walk`].
 pub type WalkCallback = Box<dyn Fn(WalkProgress) + Send + Sync>;
+
+/// Cumulative progress while copying a file off the device via
+/// [`Device::pull_file`]. Total size is intentionally absent — the caller
+/// already has it from the walk (`MediaFile::size_bytes`), so it divides the
+/// progress bar against a number it owns and both backends stay simple.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullProgress {
+    pub copied_bytes: u64,
+}
+
+/// Progress sink for [`Device::pull_file`]. Called as chunks land; a closed
+/// sink is a no-op (the copy still completes).
+pub type PullCallback = Box<dyn Fn(PullProgress) + Send + Sync>;
 
 /// Static identity snapshot used by [`Device::info`]. Optional fields degrade
 /// silently to `None` on a per-key read failure — only the required fields
@@ -350,6 +366,24 @@ pub trait Device: Send + Sync {
 
     /// Delete a single file via AFC.
     async fn afc_delete(&self, path: &str) -> Result<()>;
+
+    /// Stream `remote` — an absolute device path on the media area, the same
+    /// space [`afc_walk`](Self::afc_walk) enumerates — to the local file
+    /// `dest`, creating or truncating it. Copies in fixed-size chunks so memory
+    /// stays bounded regardless of file size, calling `on_progress` after each
+    /// chunk with the running byte count. The caller owns `dest`'s location and
+    /// cleanup.
+    async fn pull_file(&self, remote: &str, dest: &Path, on_progress: PullCallback) -> Result<()>;
+
+    /// Read the byte window `[offset, offset + len)` from `remote` — an
+    /// absolute device path on the media area, the same space
+    /// [`afc_walk`](Self::afc_walk) enumerates — and return it. The read is
+    /// bounded by the caller's `len`, so the result fits in memory by
+    /// construction. A window that starts at or past EOF returns an empty
+    /// `Vec`; one that overlaps EOF returns the bytes that exist (a short
+    /// read), never an error. The caller chunks a large span into successive
+    /// windows.
+    async fn read_range(&self, remote: &str, offset: u64, len: u64) -> Result<Vec<u8>>;
 
     /// Identity snapshot — lockdown-classic reads of ~15 keys. Optional
     /// fields degrade silently to `None` per-key.
@@ -729,6 +763,16 @@ pub struct FakeDevice {
     /// this to verify the destructive path was reached.
     pub deleted: std::sync::Mutex<Vec<String>>,
     pub delete_result: Result<(), String>,
+    /// Remote paths passed to [`Device::pull_file`]. Tests inspect this to
+    /// verify the read path was reached, mirroring `deleted` / `uninstalled`.
+    pub pulled: std::sync::Mutex<Vec<String>>,
+    /// Byte payload [`Device::pull_file`] writes to `dest` and reports as
+    /// copied. Lets a test assert the bytes land and the callback fired.
+    pub pull_payload: Vec<u8>,
+    /// Backing bytes [`Device::read_range`] slices windows out of. A test reads
+    /// a window and asserts it matches the corresponding slice, including the
+    /// clamp-at-EOF behaviour.
+    pub range_payload: Vec<u8>,
     /// Seeded device-info snapshot returned from [`Device::info`].
     pub info: DeviceInfo,
     /// Recorded power requests (reboot / shutdown).
@@ -764,6 +808,11 @@ impl FakeDevice {
     /// Snapshot of paths deleted via [`Device::afc_delete`].
     pub fn deleted(&self) -> Vec<String> {
         self.deleted.lock().unwrap().clone()
+    }
+
+    /// Snapshot of remote paths pulled via [`Device::pull_file`].
+    pub fn pulled(&self) -> Vec<String> {
+        self.pulled.lock().unwrap().clone()
     }
 }
 
@@ -871,6 +920,11 @@ impl Default for FakeDevice {
             ],
             deleted: std::sync::Mutex::new(Vec::new()),
             delete_result: Ok(()),
+            pulled: std::sync::Mutex::new(Vec::new()),
+            pull_payload: b"fake media file contents".to_vec(),
+            // A few KiB of deterministic bytes (0,1,2,…,255 repeating) so a
+            // window read can be checked against the obvious slice.
+            range_payload: (0..4096u32).map(|i| i as u8).collect(),
             info: DeviceInfo {
                 name: "Lucas's iPhone".into(),
                 model_identifier: "iPhone16,2".into(),
@@ -968,6 +1022,25 @@ impl Device for FakeDevice {
             .map_err(|e| anyhow!("{path}: {e}"))
     }
 
+    async fn pull_file(&self, remote: &str, dest: &Path, on_progress: PullCallback) -> Result<()> {
+        self.pulled.lock().unwrap().push(remote.to_string());
+        tokio::fs::write(dest, &self.pull_payload).await?;
+        on_progress(PullProgress {
+            copied_bytes: self.pull_payload.len() as u64,
+        });
+        Ok(())
+    }
+
+    async fn read_range(&self, _remote: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        // Slice the seeded payload, clamping at EOF — the same contract a real
+        // backend honors (`offset` past the end → empty, overlapping the end →
+        // short read).
+        let total = self.range_payload.len() as u64;
+        let start = offset.min(total);
+        let end = offset.saturating_add(len).min(total);
+        Ok(self.range_payload[start as usize..end as usize].to_vec())
+    }
+
     async fn info(&self) -> Result<DeviceInfo> {
         Ok(self.info.clone())
     }
@@ -1048,7 +1121,7 @@ impl FakeDevice {
 mod real {
     use super::*;
     use idevice::{
-        afc::AfcClient,
+        afc::{opcode::AfcFopenMode, AfcClient},
         installation_proxy::InstallationProxyClient,
         lockdown::LockdownClient,
         pairing_file::PairingFile,
@@ -1422,6 +1495,19 @@ mod real {
                 .map_err(|e| anyhow!("delete {path} failed: {e}"))
         }
 
+        async fn pull_file(
+            &self,
+            remote: &str,
+            dest: &Path,
+            on_progress: PullCallback,
+        ) -> Result<()> {
+            pull_file_impl(&*self.provider, remote, dest, on_progress).await
+        }
+
+        async fn read_range(&self, remote: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+            read_range_impl(&*self.provider, remote, offset, len).await
+        }
+
         async fn info(&self) -> Result<DeviceInfo> {
             read_device_info(&*self.provider, &self.pairing).await
         }
@@ -1721,6 +1807,115 @@ mod real {
             bytes_seen,
         });
         Ok(files)
+    }
+
+    /// Chunk size for streaming a file off AFC. 1 MiB keeps throughput up on a
+    /// fast link while reporting progress often enough to feel live on a slow
+    /// one — see the `pull_file` design spec.
+    const PULL_CHUNK_BYTES: usize = 1024 * 1024;
+
+    /// Stream the AFC file at `remote` into the local `dest`, reading 1 MiB at a
+    /// time so memory stays bounded regardless of file size. `on_progress` fires
+    /// after each chunk with the running byte count.
+    async fn pull_file_impl(
+        provider: &dyn IdeviceProvider,
+        remote: &str,
+        dest: &Path,
+        on_progress: PullCallback,
+    ) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut afc = AfcClient::connect(provider)
+            .await
+            .map_err(|e| anyhow::Error::from(DeviceError::AfcUnreachable(format!("{e}"))))?;
+        let mut handle = afc
+            .open(remote.to_string(), AfcFopenMode::RdOnly)
+            .await
+            .map_err(|e| anyhow!("open {remote} failed: {e}"))?;
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .with_context(|| format!("create {}", dest.display()))?;
+
+        let mut buf = vec![0u8; PULL_CHUNK_BYTES];
+        let mut copied: u64 = 0;
+        loop {
+            let read = handle
+                .read(&mut buf)
+                .await
+                .map_err(|e| anyhow!("read {remote} failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buf[..read])
+                .await
+                .with_context(|| format!("write {}", dest.display()))?;
+            copied = copied.saturating_add(read as u64);
+            on_progress(PullProgress {
+                copied_bytes: copied,
+            });
+        }
+        handle
+            .close()
+            .await
+            .map_err(|e| anyhow!("close {remote} failed: {e}"))?;
+        file.flush()
+            .await
+            .with_context(|| format!("flush {}", dest.display()))?;
+        Ok(())
+    }
+
+    /// Sub-buffer size for accumulating a `read_range` window. The window is
+    /// already bounded by the caller's `len`, but reading in fixed slices keeps
+    /// one misbehaving `len` from triggering a giant up-front allocation.
+    const RANGE_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+    /// Read the byte window `[offset, offset + len)` from the AFC file at
+    /// `remote` by seeking device-side and reading until `len` bytes are
+    /// collected or EOF cuts it short. A seek at/past EOF yields an empty `Vec`.
+    async fn read_range_impl(
+        provider: &dyn IdeviceProvider,
+        remote: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>> {
+        use std::io::SeekFrom;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut afc = AfcClient::connect(provider)
+            .await
+            .map_err(|e| anyhow::Error::from(DeviceError::AfcUnreachable(format!("{e}"))))?;
+        let mut handle = afc
+            .open(remote.to_string(), AfcFopenMode::RdOnly)
+            .await
+            .map_err(|e| anyhow!("open {remote} failed: {e}"))?;
+        handle
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|e| anyhow!("seek {remote} failed: {e}"))?;
+
+        let mut out = Vec::new();
+        let mut remaining = len;
+        let mut buf = vec![0u8; RANGE_READ_CHUNK_BYTES];
+        while remaining > 0 {
+            let want = (remaining as usize).min(buf.len());
+            let read = handle
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| anyhow!("read {remote} failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read]);
+            remaining -= read as u64;
+        }
+        handle
+            .close()
+            .await
+            .map_err(|e| anyhow!("close {remote} failed: {e}"))?;
+        Ok(out)
     }
 
     /// Single `installation_proxy.browse` call. Pass `bundle_ids = Some(...)`
@@ -2293,6 +2488,69 @@ mod tests {
         let fake = FakeDevice::with_status_error("device not trusted");
         let err = fake.status().await.unwrap_err();
         assert!(err.to_string().contains("device not trusted"));
+    }
+
+    #[tokio::test]
+    async fn fake_pull_file_writes_payload_records_path_and_reports_progress() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let fake = FakeDevice::default();
+        let dest = std::env::temp_dir().join("quokka_fake_pull_file.bin");
+        let reported = Arc::new(AtomicU64::new(0));
+        let sink = reported.clone();
+
+        fake.pull_file(
+            "/DCIM/103APPLE/IMG_4521.MOV",
+            &dest,
+            Box::new(move |p| sink.store(p.copied_bytes, Ordering::SeqCst)),
+        )
+        .await
+        .expect("pull ok");
+
+        // Payload lands at dest, the remote path is recorded, and the callback
+        // fired with the full payload length.
+        assert_eq!(
+            std::fs::read(&dest).expect("dest written"),
+            fake.pull_payload
+        );
+        assert_eq!(fake.pulled(), vec!["/DCIM/103APPLE/IMG_4521.MOV"]);
+        assert_eq!(
+            reported.load(Ordering::SeqCst),
+            fake.pull_payload.len() as u64
+        );
+
+        std::fs::remove_file(&dest).ok();
+    }
+
+    #[tokio::test]
+    async fn fake_read_range_slices_window_and_clamps_at_eof() {
+        let fake = FakeDevice::default();
+        let total = fake.range_payload.len() as u64;
+
+        // A mid-file window returns exactly that slice.
+        let mid = fake.read_range("/whatever", 100, 50).await.unwrap();
+        assert_eq!(mid, fake.range_payload[100..150]);
+
+        // A window overlapping EOF returns the short tail, not an error.
+        let tail = fake.read_range("/whatever", total - 10, 100).await.unwrap();
+        assert_eq!(tail, fake.range_payload[(total as usize - 10)..]);
+        assert_eq!(tail.len(), 10);
+
+        // Offset at/after EOF is an empty Vec.
+        assert!(fake
+            .read_range("/whatever", total, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(fake
+            .read_range("/whatever", total + 999, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A zero-length window is an empty Vec.
+        assert!(fake.read_range("/whatever", 0, 0).await.unwrap().is_empty());
     }
 
     /// Serialize → deserialize → serialize must be a fixed point. This pins the
