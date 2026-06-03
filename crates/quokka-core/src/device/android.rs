@@ -1028,6 +1028,31 @@ mod tests {
         assert!(parse_logcat_line("").is_none());
     }
 
+    #[tokio::test]
+    async fn counting_writer_tallies_bytes_and_reports_cumulative_progress() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::AsyncWriteExt;
+
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let sink = seen.clone();
+        let mut writer = CountingWriter::new(
+            Vec::<u8>::new(),
+            Box::new(move |p: PullProgress| sink.lock().unwrap().push(p.copied_bytes)),
+        );
+        writer.write_all(b"hello").await.unwrap();
+        writer.write_all(b", world").await.unwrap();
+        writer.flush().await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        // Bytes reached the inner writer unchanged...
+        assert_eq!(writer.inner, b"hello, world");
+        // ...and progress was reported cumulatively, monotonically, ending at
+        // the running total.
+        let progress = seen.lock().unwrap().clone();
+        assert_eq!(progress.last().copied(), Some(12));
+        assert!(progress.windows(2).all(|w| w[0] <= w[1]));
+    }
+
     #[test]
     fn shell_single_quote_escapes_quotes_and_spaces() {
         assert_eq!(
