@@ -49,7 +49,16 @@ if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
   exit 1
 fi
 
-CURRENT="$(grep -E '^version = ' Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')"
+# The release version tracks the quokka-cli crate: it builds the published
+# `quokka`/`qk` binaries that the v<version> tag and cargo-dist ship. The
+# workspace root has no [package] version, and quokka-core versions
+# independently, so neither is the source of truth here.
+MANIFEST="crates/quokka-cli/Cargo.toml"
+CURRENT="$(grep -E '^version = ' "$MANIFEST" | head -1 | sed -E 's/version = "(.*)"/\1/' || true)"
+if [[ -z "$CURRENT" ]]; then
+  echo "error: could not read a 'version = ' line from $MANIFEST" >&2
+  exit 1
+fi
 echo "current version: $CURRENT"
 echo "new version:     $VERSION"
 echo "tag:             $TAG"
@@ -60,11 +69,11 @@ case "$ans" in
   *) echo "aborted."; exit 0 ;;
 esac
 
-sed -i.bak -E "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-rm Cargo.toml.bak
+sed -i.bak -E "s/^version = \".*\"/version = \"$VERSION\"/" "$MANIFEST"
+rm "$MANIFEST.bak"
 cargo build --quiet
 
-git add Cargo.toml Cargo.lock
+git add "$MANIFEST" Cargo.lock
 git commit -m "chore: release $TAG"
 
 echo
