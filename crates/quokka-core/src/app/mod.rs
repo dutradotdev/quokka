@@ -24,11 +24,15 @@ use crate::device::{
     App, BatchCallback, Device, DeviceError, DeviceInfo, DeviceStatus, LogEntry, MediaFile,
     PullCallback, WalkCallback,
 };
+use crate::logic::thumbnail;
 use crate::logic::{analyze, media};
 
 // Re-export the report DTO that lives next to its pure builders, so callers
 // reach the whole facade surface through `app::`.
 pub use crate::logic::media::MediaReport;
+// Same for the thumbnail DTOs + streaming-batch types — the GUI mirrors these
+// in `bindings.ts` and reuses the enrichment channel pattern for `ThumbBatch`.
+pub use crate::logic::thumbnail::{ThumbBatch, ThumbCallback, ThumbFormat, Thumbnail};
 
 /// Recover the typed [`DeviceError`] from an `anyhow::Error`, falling back to
 /// [`DeviceError::Other`] when the source wasn't a `DeviceError`. This is the
@@ -219,6 +223,122 @@ pub async fn read_range(
         .map_err(to_device_error)
 }
 
+/// Produce a browser-renderable thumbnail for the media file at `remote`,
+/// downscaled to fit `max_dim` on its longest edge. Reads as few bytes as
+/// possible: it pulls the file's header window, locates an embedded thumbnail
+/// (EXIF for JPEG, the thumbnail item for HEIF, the cover atom for MOV/MP4),
+/// and re-encodes that to JPEG — no full-file pull, no image decoder beyond the
+/// embedded thumbnail. Returns `Ok(None)` when the file carries no embedded
+/// thumbnail B1 can use (the GUI keeps its kind icon); `Err` only on a genuine
+/// device read failure.
+pub async fn thumbnail(
+    device: &dyn Device,
+    remote: &str,
+    max_dim: u32,
+) -> Result<Option<Thumbnail>, DeviceError> {
+    build_thumbnail(device, remote, max_dim).await
+}
+
+/// Stream thumbnails for `paths`, emitting one [`ThumbBatch`] per processed file
+/// as results land. Mirrors [`apps`] enrichment: a bounded fan-out keeps a large
+/// grid from opening one device read per file at once, files that yield no
+/// thumbnail still advance `done`, and a per-file read/parse failure is skipped
+/// (logged, not fatal) so one odd file never aborts the batch. A closed callback
+/// channel simply drops updates while the remaining work continues.
+pub async fn thumbnails(
+    device: &dyn Device,
+    paths: &[String],
+    max_dim: u32,
+    on_batch: ThumbCallback,
+) -> Result<(), DeviceError> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    let total = paths.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let mut in_flight = FuturesUnordered::new();
+    let mut next = 0;
+    while next < total && in_flight.len() < thumbnail::FAN_OUT {
+        in_flight.push(thumbnail_or_skip(device, &paths[next], max_dim));
+        next += 1;
+    }
+
+    let mut done = 0;
+    while let Some(result) = in_flight.next().await {
+        done += 1;
+        on_batch(ThumbBatch {
+            thumbnails: result.into_iter().collect(),
+            done,
+            total,
+        });
+        if next < total {
+            in_flight.push(thumbnail_or_skip(device, &paths[next], max_dim));
+            next += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Batch worker: a per-file read/parse failure degrades to `None` (warned, not
+/// fatal) so the streaming batch keeps producing for the rest of the grid.
+async fn thumbnail_or_skip(device: &dyn Device, remote: &str, max_dim: u32) -> Option<Thumbnail> {
+    match build_thumbnail(device, remote, max_dim).await {
+        Ok(thumb) => thumb,
+        Err(e) => {
+            eprintln!("warning: skipping thumbnail for {remote}: {e}");
+            None
+        }
+    }
+}
+
+/// Read the header window, locate an embedded thumbnail, resolve its bytes, and
+/// re-encode to JPEG. `Ok(None)` means "no usable embedded thumbnail"; `Err`
+/// means the device read failed.
+async fn build_thumbnail(
+    device: &dyn Device,
+    remote: &str,
+    max_dim: u32,
+) -> Result<Option<Thumbnail>, DeviceError> {
+    let header = device
+        .read_range(remote, 0, thumbnail::READ_WINDOW_BYTES)
+        .await
+        .map_err(to_device_error)?;
+    let Some(region) = thumbnail::locate(&header, remote) else {
+        return Ok(None);
+    };
+    let candidate = resolve_region(device, remote, &header, region).await?;
+    Ok(
+        thumbnail::encode::to_jpeg_thumbnail(&candidate, max_dim).map(|encoded| Thumbnail {
+            remote: remote.to_string(),
+            width: encoded.width,
+            height: encoded.height,
+            format: ThumbFormat::Jpeg,
+            bytes: encoded.bytes,
+        }),
+    )
+}
+
+/// Resolve a located region to its bytes: slice it straight from the header
+/// window when it sits inside (no extra device round-trip), otherwise issue one
+/// bounded read for it.
+async fn resolve_region(
+    device: &dyn Device,
+    remote: &str,
+    header: &[u8],
+    region: thumbnail::ThumbRegion,
+) -> Result<Vec<u8>, DeviceError> {
+    let end = region.offset.saturating_add(region.len);
+    if end <= header.len() as u64 {
+        return Ok(header[region.offset as usize..end as usize].to_vec());
+    }
+    device
+        .read_range(remote, region.offset, region.len)
+        .await
+        .map_err(to_device_error)
+}
+
 /// A fully rendered share card: the projected data, the SVG, and the rasterized
 /// PNG bytes. The GUI consumes this directly; the CLI writes the PNG to disk and
 /// opens it. `Serialize` only — [`CardData`] holds `&'static str`, so it never
@@ -263,4 +383,138 @@ pub async fn stream_logs(
     device: &dyn Device,
 ) -> Result<Receiver<anyhow::Result<LogEntry>>, DeviceError> {
     device.stream_logs().await.map_err(to_device_error)
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    //! End-to-end tests of the `thumbnail`/`thumbnails` facade against a
+    //! `FakeDevice` seeded with a real JPEG carrying an embedded EXIF thumbnail.
+    //! These live in-crate (not in `tests/facade.rs`) because building and
+    //! decoding the fixture needs the `image` crate, a normal dependency only
+    //! the crate itself can `use`.
+    use super::*;
+    use crate::device::FakeDevice;
+    use crate::logic::thumbnail::encode::solid_jpeg as jpeg;
+    use std::sync::{Arc, Mutex};
+
+    /// A JPEG file whose EXIF `APP1` IFD1 carries `thumb` as its embedded
+    /// thumbnail. Layout mirrors what `jpeg::exif_thumbnail` walks.
+    fn jpeg_with_exif_thumbnail(thumb: &[u8]) -> Vec<u8> {
+        // TIFF (big-endian): empty IFD0, IFD1 with thumb offset/length tags.
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"MM");
+        tiff.extend_from_slice(&0x002Au16.to_be_bytes());
+        tiff.extend_from_slice(&8u32.to_be_bytes()); // IFD0 @ 8
+        tiff.extend_from_slice(&0u16.to_be_bytes()); // IFD0: 0 entries
+        tiff.extend_from_slice(&14u32.to_be_bytes()); // next IFD (IFD1) @ 14
+        tiff.extend_from_slice(&2u16.to_be_bytes()); // IFD1: 2 entries
+        const THUMB_OFFSET_TAG: u16 = 0x0201;
+        const THUMB_LENGTH_TAG: u16 = 0x0202;
+        const TIFF_TYPE_LONG: u16 = 4;
+        // IFD1 ends at TIFF offset 44 (16 + 2 entries × 12 + 4-byte next ptr),
+        // where the thumbnail bytes are appended.
+        const THUMB_TIFF_OFFSET: u32 = 44;
+        let mut entry = |tag: u16, value: u32| {
+            tiff.extend_from_slice(&tag.to_be_bytes());
+            tiff.extend_from_slice(&TIFF_TYPE_LONG.to_be_bytes());
+            tiff.extend_from_slice(&1u32.to_be_bytes());
+            tiff.extend_from_slice(&value.to_be_bytes());
+        };
+        entry(THUMB_OFFSET_TAG, THUMB_TIFF_OFFSET);
+        entry(THUMB_LENGTH_TAG, thumb.len() as u32);
+        tiff.extend_from_slice(&0u32.to_be_bytes()); // no further IFD
+        assert_eq!(tiff.len() as u32, THUMB_TIFF_OFFSET);
+        tiff.extend_from_slice(thumb);
+
+        let mut app1 = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        let seg_len = (app1.len() + 2) as u16;
+
+        let mut file = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        file.extend_from_slice(&seg_len.to_be_bytes());
+        file.extend_from_slice(&app1);
+        file.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        file
+    }
+
+    fn fake_with_files(files: &[(&str, Vec<u8>)]) -> FakeDevice {
+        let range_files = files
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), bytes.clone()))
+            .collect();
+        FakeDevice {
+            range_files,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn thumbnail_extracts_and_downscales_embedded_jpeg() {
+        let path = "/DCIM/100APPLE/IMG_0001.JPG";
+        let fake = fake_with_files(&[(path, jpeg_with_exif_thumbnail(&jpeg(120, 60)))]);
+
+        let thumb = app_thumbnail(&fake, path).await;
+        assert_eq!(thumb.remote, path);
+        assert_eq!(thumb.format, ThumbFormat::Jpeg);
+        // 120×60 thumbnail downscaled to fit max_dim 64 on the long edge.
+        assert_eq!((thumb.width, thumb.height), (64, 32));
+        assert_eq!(&thumb.bytes[0..3], &[0xFF, 0xD8, 0xFF]); // valid JPEG
+    }
+
+    /// A file with no recognizable container yields `None`, not an error — the
+    /// GUI keeps its kind icon.
+    #[tokio::test]
+    async fn thumbnail_is_none_for_non_media() {
+        let path = "/Downloads/manual.pdf";
+        let fake = fake_with_files(&[(path, b"%PDF-1.7 not an image".to_vec())]);
+        let result = thumbnail(&fake, path, 64).await.expect("ok");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn thumbnails_streams_one_batch_per_file_and_counts_progress() {
+        let jpg = "/DCIM/100APPLE/IMG_0001.JPG";
+        let pdf = "/Downloads/manual.pdf";
+        let fake = fake_with_files(&[
+            (jpg, jpeg_with_exif_thumbnail(&jpeg(80, 80))),
+            (pdf, b"%PDF not an image".to_vec()),
+        ]);
+        let paths = vec![jpg.to_string(), pdf.to_string()];
+
+        let collected: Arc<Mutex<Vec<ThumbBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&collected);
+        thumbnails(
+            &fake,
+            &paths,
+            64,
+            Box::new(move |batch| sink.lock().unwrap().push(batch)),
+        )
+        .await
+        .expect("ok");
+
+        let batches = collected.lock().unwrap();
+        // One batch per processed file; cumulative done reaches total.
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches.last().unwrap().done, 2);
+        assert!(batches.iter().all(|b| b.total == 2));
+        // Exactly the JPEG produced a thumbnail; the PDF advanced done only.
+        let produced: usize = batches.iter().map(|b| b.thumbnails.len()).sum();
+        assert_eq!(produced, 1);
+        let thumb = batches
+            .iter()
+            .flat_map(|b| &b.thumbnails)
+            .next()
+            .expect("one thumbnail");
+        assert_eq!(thumb.remote, jpg);
+    }
+
+    /// Convenience: unwrap the single-file facade to a `Thumbnail`, using the
+    /// 64-pixel test `max_dim`.
+    async fn app_thumbnail(device: &dyn Device, remote: &str) -> Thumbnail {
+        thumbnail(device, remote, 64)
+            .await
+            .expect("ok")
+            .expect("some thumbnail")
+    }
 }

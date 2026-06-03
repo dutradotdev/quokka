@@ -773,6 +773,11 @@ pub struct FakeDevice {
     /// a window and asserts it matches the corresponding slice, including the
     /// clamp-at-EOF behaviour.
     pub range_payload: Vec<u8>,
+    /// Per-path overrides for [`Device::read_range`], keyed by remote path. A
+    /// path present here is served from its own bytes (e.g. a real JPEG with an
+    /// embedded EXIF thumbnail), so the `thumbnail` facade can be exercised
+    /// end-to-end; any other path falls back to [`Self::range_payload`].
+    pub range_files: std::collections::HashMap<String, Vec<u8>>,
     /// Seeded device-info snapshot returned from [`Device::info`].
     pub info: DeviceInfo,
     /// Recorded power requests (reboot / shutdown).
@@ -925,6 +930,7 @@ impl Default for FakeDevice {
             // A few KiB of deterministic bytes (0,1,2,…,255 repeating) so a
             // window read can be checked against the obvious slice.
             range_payload: (0..4096u32).map(|i| i as u8).collect(),
+            range_files: std::collections::HashMap::new(),
             info: DeviceInfo {
                 name: "Lucas's iPhone".into(),
                 model_identifier: "iPhone16,2".into(),
@@ -1031,14 +1037,16 @@ impl Device for FakeDevice {
         Ok(())
     }
 
-    async fn read_range(&self, _remote: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
-        // Slice the seeded payload, clamping at EOF — the same contract a real
-        // backend honors (`offset` past the end → empty, overlapping the end →
-        // short read).
-        let total = self.range_payload.len() as u64;
+    async fn read_range(&self, remote: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        // A path with its own seeded bytes is served from those (the thumbnail
+        // fixtures); everything else slices the shared payload. Both clamp at
+        // EOF — the same contract a real backend honors (`offset` past the end →
+        // empty, overlapping the end → short read).
+        let backing = self.range_files.get(remote).unwrap_or(&self.range_payload);
+        let total = backing.len() as u64;
         let start = offset.min(total);
         let end = offset.saturating_add(len).min(total);
-        Ok(self.range_payload[start as usize..end as usize].to_vec())
+        Ok(backing[start as usize..end as usize].to_vec())
     }
 
     async fn info(&self) -> Result<DeviceInfo> {

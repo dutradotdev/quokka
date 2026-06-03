@@ -48,18 +48,41 @@ decisions, and projections live in `quokka-core`; anything touching a terminal,
 core must never reference `crate::commands` or `crate::ui`.
 
 The **facade** (`quokka_core::app`) is one async fn per operation
-(`status`, `info`, `apps`, `analyze`, `media`, `delete_files`, `card`, `reboot`,
-`shutdown`, `stream_logs`), each returning a serializable DTO and `DeviceError`.
+(`status`, `info`, `apps`, `analyze`, `media`, `delete_files`, `pull_file`,
+`read_range`, `thumbnail`, `thumbnails`, `card`, `reboot`, `shutdown`,
+`stream_logs`), each returning a serializable DTO and `DeviceError`.
 The CLI renders these; `--json` prints them; the GUI wraps each in a one-line
 command. `run()` dispatches `--json` generically for the one-shot query commands
 (`status`/`info`/`apps`/`analyze`/`media`/`devices`); `logs --json` streams
-NDJSON; `card`/`capture` stay out of `--json`.
+NDJSON; `card`/`capture` stay out of `--json`. `pull_file` / `read_range` /
+`thumbnail` / `thumbnails` are GUI-facing facade functions with no CLI command.
 
 **The `Device` trait in `crates/quokka-core/src/device/mod.rs` is the seam that makes the whole project testable — and platform-agnostic.** Every device operation, iPhone **or** Android, goes through this trait. The iOS implementation lives in a private `mod real` submodule talking to the [`idevice`](https://github.com/jkcoxson/idevice) crate; the Android implementation in `mod android` talking to a local `adb` server via [`forensic-adb`](https://crates.io/crates/forensic-adb); tests use the in-module `FakeDevice`. **No `idevice` *or* `forensic_adb` type may be exposed through the public surface of `device/mod.rs`** — both crates ship breaking changes pre-1.0, and the seam exists to absorb them. (`forensic-adb` was chosen over `adb_client`: the latter pulls in `rsa`, which carries the unpatched RUSTSEC-2023-0071 advisory. Server-mode adb lets the daemon do device auth, so no client-side RSA is needed and the tree stays crypto-free.) Commands consume the trait and quokka's own neutral types only; **no command may branch on platform** (`if ios` / `if android`). If a command needs to know the platform, the trait leaked — fix the trait, not the command. Capabilities that exist on one platform only (packet capture is iOS-only) are exposed as a separate extension trait (`CaptureCapable`) reached via `Device::as_capture()`, not a platform check.
 
 When adding a capability (e.g. battery, app list, AFC walk), add a method to the `Device` trait and implement it in **both** `mod real` and `mod android` (Android degrades unavailable data to `None`/empty rather than failing). Commands consume the trait, not `idevice`/`forensic_adb` directly.
 
 Both backend crates are pinned with `=` (idevice `=0.1.x`, forensic-adb `=0.8.x`) for the same reason. When bumping, re-do the API research before touching code — for `idevice`, the `tools/src/` directory of the upstream repo is the canonical example of current usage.
+
+### Cross-platform: `quokka-core` must build for Windows **and** macOS
+
+The GUI (a separate repo) ships on both **Windows and macOS** and depends on
+`quokka-core`, so **any code added to `quokka-core` must compile and run on both
+platforms**. Concretely:
+
+- **No native build dependencies** that don't cross-compile cleanly. Prefer
+  pure-Rust crates. The media-thumbnail stack, for example, uses `image` with
+  only its pure-Rust `jpeg`/`png` codecs (no `libheif`/system C libs); a HEIF
+  decoder, if ever added (Phase B2), must be gated so it never becomes a hard
+  Windows build requirement.
+- **No platform-only `std` assumptions** — no `/`-rooted host paths, no
+  `std::os::unix`, no shelling out to Unix-only tools. Use `std::path::Path`,
+  `cfg`-gate anything genuinely OS-specific, and degrade gracefully.
+- This rule is about the **host** the core runs on (the user's Mac or Windows
+  PC), independent of the *target device* (iPhone/Android). The CLI's release
+  artifacts and the `idevice`/`forensic-adb` device transports may stay
+  macOS-first; the **core's host-side logic** (facade, projections, parsers,
+  encoders) may not regress Windows support. When in doubt, keep new core logic
+  OS-agnostic and push anything unavoidably platform-specific behind a `cfg`.
 
 ### Two binaries, one entry point
 
@@ -132,5 +155,17 @@ SVG output is byte-identical given identical device state plus a fixed `now`.
 Reads from lockdown domains already in use by `status` / `info` / `apps`
 (`com.apple.disk_usage` adds `CameraUsage` / `MobileApplicationUsage` /
 `OtherUsage`; `installation_proxy.browse` adds `LSInstallDate`).
+
+`app::thumbnail` / `app::thumbnails` produce small JPEG thumbnails for the GUI's
+media grid (Phase B1: embedded-thumbnail fast path). The pure parsers live in
+`quokka_core::logic::thumbnail` (`jpeg`/`heif`/`mov` extractors over a shared
+`bmff` box walker, plus `encode`); the facade drives them over the existing
+`Device::read_range` — it reads only the header window, locates an embedded
+thumbnail (EXIF for JPEG, the HEIF thumbnail item, the MOV cover atom), and
+re-encodes it. No full-file pull and **no HEIF/HEVC decoder** in B1 — a
+candidate that isn't a decodable JPEG/PNG returns `None` (kind icon stays). The
+parsers are tolerant (any malformed structure → `None`, never a panic), with a
+property test per parser. `thumbnails` mirrors `apps` enrichment: bounded
+fan-out, one `ThumbBatch` per file, errors skipped not fatal.
 
 If a request looks like one of the above, push back and reference this section.

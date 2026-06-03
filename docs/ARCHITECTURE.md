@@ -50,11 +50,13 @@ whole tool can be driven in a test without a binary, a terminal, or a device.
 ## The facade and `--json`
 
 `quokka_core::app` is a surface-agnostic API: `app::status`, `app::info`,
-`app::apps`, `app::analyze`, `app::media`, `app::delete_files`, `app::card`,
+`app::apps`, `app::analyze`, `app::media`, `app::delete_files`, `app::pull_file`,
+`app::read_range`, `app::thumbnail`, `app::thumbnails`, `app::card`,
 `app::reboot`, `app::shutdown`, `app::stream_logs`. Each drives the `Device`
 trait plus the pure logic and returns a serializable DTO (or a `Receiver` of
 DTOs, for streaming `logs`), surfacing failures as a serializable `DeviceError`
-(`{ kind, message }`).
+(`{ kind, message }`). `pull_file` / `read_range` / `thumbnail` / `thumbnails`
+are GUI-facing (media preview + the thumbnail grid) and have no CLI command.
 
 `run()` dispatches generically over this: for the one-shot query commands
 (`status`, `info`, `apps`, `analyze`, `media`, `devices`), `--json` prints

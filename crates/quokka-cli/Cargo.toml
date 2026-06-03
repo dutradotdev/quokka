@@ -63,7 +63,9 @@ futures = "0.3"
 # anstream auto-detects TTY and strips ANSI when piped; owo-colors composes on top.
 owo-colors = { version = "4", features = ["supports-colors"] }
 anstream = "0.6"
-indicatif = "0.17"
+# 0.18 dropped the unmaintained `number_prefix` (RUSTSEC-2025-0119) for
+# `unit-prefix`; keep at ≥0.18 so the audit stays clean.
+indicatif = "0.18"
 # Confirm prompt after TUI selection. MultiSelect was replaced by the
 # ratatui-based picker (live size updates during Phase 2 enrichment).
 dialoguer = { version = "0.11", default-features = false }

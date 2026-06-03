@@ -4,6 +4,7 @@
 
 pub mod analyze;
 pub mod media;
+pub mod thumbnail;
 
 use crate::device::MediaFile;
 

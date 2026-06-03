@@ -63,6 +63,44 @@ async fn media_builds_report_and_round_trips() {
 }
 
 #[tokio::test]
+async fn thumbnail_is_none_for_non_media_file() {
+    // A file with no recognizable container yields `Ok(None)` — never an error.
+    // The positive extraction path is unit-tested in-crate (it needs the
+    // `image` codec); here we pin the facade's "no thumbnail" contract.
+    let mut range_files = std::collections::HashMap::new();
+    range_files.insert("/Downloads/manual.pdf".to_string(), b"%PDF-1.7".to_vec());
+    let fake = FakeDevice {
+        range_files,
+        ..Default::default()
+    };
+    let result = app::thumbnail(&fake, "/Downloads/manual.pdf", 256)
+        .await
+        .expect("thumbnail ok");
+    assert!(result.is_none());
+}
+
+#[test]
+fn thumb_batch_round_trips() {
+    // Pin the IPC payload the GUI mirrors in `bindings.ts`.
+    use quokka_core::app::{ThumbBatch, ThumbFormat, Thumbnail};
+    let batch = ThumbBatch {
+        thumbnails: vec![Thumbnail {
+            remote: "/DCIM/100APPLE/IMG_0001.JPG".into(),
+            width: 256,
+            height: 128,
+            format: ThumbFormat::Jpeg,
+            bytes: vec![0xFF, 0xD8, 0xFF, 0x00, 0x01],
+        }],
+        done: 1,
+        total: 4,
+    };
+    assert_round_trips(&batch);
+    // `format` serializes camelCase ("jpeg"), like the other DTO enums.
+    let json = serde_json::to_value(&batch).expect("serialize");
+    assert_eq!(json["thumbnails"][0]["format"], "jpeg");
+}
+
+#[tokio::test]
 async fn analyze_sorts_files_and_flags_live_photos() {
     // A .MOV next to a matching .HEIC is the live-photo-motion signal.
     let fake = FakeDevice {

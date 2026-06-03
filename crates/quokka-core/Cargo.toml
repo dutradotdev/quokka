@@ -81,6 +81,13 @@ urlencoding = "2"
 # us ship a single self-contained SVG with no external file references.
 base64 = "0.22"
 
+# Decode + downscale + re-encode embedded media thumbnails (the `thumbnail`
+# facade). Pure-Rust codecs only (`jpeg`, `png`) — no `libheif`/native build
+# step — so the core cross-compiles cleanly to both macOS and Windows, which
+# the GUI targets. The HEIF/HEVC decoder (Phase B2) is deliberately *not*
+# pulled in: B1 only re-encodes embedded thumbnails that are already JPEG/PNG.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # Property testing for the tolerant Android parsers (dumpsys / diskstats). The
