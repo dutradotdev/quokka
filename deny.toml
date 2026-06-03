@@ -42,6 +42,11 @@ confidence-threshold = 0.93
 # notice but don't fail (one duplicate during a transitive bump is normal).
 multiple-versions = "warn"
 wildcards = "deny"
+# `quokka-cli` depends on `quokka-core` by path with no version, which reads as
+# a `*` requirement. That's the normal workspace shape for our private
+# (`publish = false`) crates, so exempt intra-workspace path deps rather than
+# pinning a version we'd have to bump in lockstep.
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]
