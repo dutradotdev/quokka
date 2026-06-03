@@ -107,6 +107,55 @@ async fn delete_files_records_each_path() {
 }
 
 #[tokio::test]
+async fn pull_file_copies_bytes_and_reports_progress() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let fake = FakeDevice::default();
+    let dest = std::env::temp_dir().join("quokka_facade_pull_file.bin");
+    let reported = Arc::new(AtomicU64::new(0));
+    let sink = reported.clone();
+
+    app::pull_file(
+        &fake,
+        "/DCIM/103APPLE/IMG_4521.MOV",
+        &dest,
+        Box::new(move |p| sink.store(p.copied_bytes, Ordering::SeqCst)),
+    )
+    .await
+    .expect("pull ok");
+
+    assert_eq!(
+        std::fs::read(&dest).expect("dest written"),
+        fake.pull_payload
+    );
+    assert_eq!(fake.pulled(), vec!["/DCIM/103APPLE/IMG_4521.MOV"]);
+    assert_eq!(
+        reported.load(Ordering::SeqCst),
+        fake.pull_payload.len() as u64
+    );
+
+    std::fs::remove_file(&dest).ok();
+}
+
+#[tokio::test]
+async fn read_range_returns_requested_window() {
+    let fake = FakeDevice::default();
+    let total = fake.range_payload.len() as u64;
+
+    let window = app::read_range(&fake, "/DCIM/103APPLE/IMG_4521.MOV", 200, 64)
+        .await
+        .expect("read_range ok");
+    assert_eq!(window, fake.range_payload[200..264]);
+
+    // Past EOF clamps to a short read (here, empty) rather than erroring.
+    let past = app::read_range(&fake, "/DCIM/103APPLE/IMG_4521.MOV", total, 64)
+        .await
+        .expect("read_range ok");
+    assert!(past.is_empty());
+}
+
+#[tokio::test]
 async fn card_renders_png_and_serializes() {
     let fake = FakeDevice::default();
     let rendered = app::card(&fake, NOW, false).await.expect("card ok");

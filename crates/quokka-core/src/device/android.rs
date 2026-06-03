@@ -26,16 +26,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
+use std::task::{ready, Context, Poll};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use forensic_adb::{AndroidStorageInput, DeviceError as AdbError, Host};
+use forensic_adb::{AndroidStorageInput, DeviceError as AdbError, Host, UnixPath};
+use tokio::io::AsyncWrite;
 use tokio::process::Command;
 
 use super::{
     App, BatchCallback, BatchUpdate, Battery, Device, DeviceError, DeviceInfo, DeviceListing,
-    DeviceStatus, LogEntry, LogLevel, MediaFile, Platform, Storage, WalkCallback, WalkProgress,
+    DeviceStatus, LogEntry, LogLevel, MediaFile, Platform, PullCallback, PullProgress, Storage,
+    WalkCallback, WalkProgress,
 };
 
 /// AFC-equivalent media roots on Android shared storage. The walk is confined
@@ -309,6 +314,48 @@ impl Device for AndroidDevice {
         Ok(())
     }
 
+    async fn pull_file(&self, remote: &str, dest: &Path, on_progress: PullCallback) -> Result<()> {
+        // `pull` streams the file to the writer in adb-sized chunks, so a
+        // counting `AsyncWrite` wrapper is how Android reports progress without
+        // a separate `stat` round trip.
+        let device = self.device().await?;
+        let file = tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| DeviceError::Other(format!("create {}: {e}", dest.display())))?;
+        let mut writer = CountingWriter::new(file, on_progress);
+        adb_result(device.pull(UnixPath::new(remote), &mut writer).await)?;
+        // `pull` writes but never flushes; flush so the last chunk is durable
+        // before the caller opens the file.
+        tokio::io::AsyncWriteExt::flush(&mut writer)
+            .await
+            .map_err(|e| DeviceError::Other(format!("flush {}: {e}", dest.display())))?;
+        Ok(())
+    }
+
+    async fn read_range(&self, remote: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        // adb SYNC `RECV` can't seek, so the window comes from a shell tool over
+        // the raw `exec:` channel (`exec_out` → bytes; `shell` would mangle
+        // binary through UTF-8). Tolerant, not OEM-branched: prefer byte-granular
+        // `dd` (it `lseek`s to `offset`, so a deep seek doesn't re-read the
+        // prefix), then fall back to `tail | head` for toybox without
+        // `skip_bytes`. An empty `dd` result means either EOF (correct) or an
+        // unsupported flag — the fallback resolves both.
+        let device = self.device().await?;
+        let path = shell_single_quote(remote);
+        let dd = format!(
+            "dd if={path} iflag=skip_bytes,count_bytes bs=1m skip={offset} count={len} 2>/dev/null"
+        );
+        let bytes = adb_result(device.execute_host_exec_out_command(&dd).await)?;
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+        let tail = format!("tail -c +{} {path} | head -c {len}", offset + 1);
+        adb_result(device.execute_host_exec_out_command(&tail).await)
+    }
+
     async fn info(&self) -> Result<DeviceInfo> {
         // Independent property reads — overlap them like `status` does.
         let (model, device_id, os_version, os_build, hardware_model, cpu_architecture) = tokio::join!(
@@ -383,6 +430,52 @@ impl Device for AndroidDevice {
             }
         });
         Ok(rx)
+    }
+}
+
+/// An [`AsyncWrite`] that tallies bytes as they pass through to `inner` and
+/// reports cumulative progress. [`forensic_adb::Device::pull`] streams to a
+/// writer, so wrapping the destination file is how the Android backend reports
+/// `pull_file` progress — the spec's "wrap the writer, count as it passes"
+/// shape — without a separate `stat` round trip.
+struct CountingWriter<W> {
+    inner: W,
+    copied: u64,
+    on_progress: PullCallback,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W, on_progress: PullCallback) -> Self {
+        Self {
+            inner,
+            copied: 0,
+            on_progress,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for CountingWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        // `Self: Unpin` (the bound below), so the pin auto-derefs and fields
+        // are reachable directly.
+        let written = ready!(Pin::new(&mut self.inner).poll_write(cx, buf))?;
+        self.copied = self.copied.saturating_add(written as u64);
+        (self.on_progress)(PullProgress {
+            copied_bytes: self.copied,
+        });
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
