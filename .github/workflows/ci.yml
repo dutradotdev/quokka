@@ -27,13 +27,16 @@ permissions:
 jobs:
   test:
     # quokka is a macOS tool (it talks to usbmuxd); CI runs on macOS to match.
-    # Release ships both x86_64 and aarch64 darwin, so test both — `macos-14`
-    # is Apple Silicon, `macos-13` is the last x86_64 image GitHub offers.
+    # Release ships both x86_64 and aarch64 darwin, so test both. GitHub
+    # retired the `macos-13` image (the last x86_64 macOS runner), so both
+    # architectures run on the arm64 image: aarch64 natively, x86_64 built
+    # with `--target` and executed through Rosetta 2, which the arm64 runner
+    # images ship preinstalled.
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-13]
-    runs-on: ${{ matrix.runner }}
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +46,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -51,18 +55,18 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (warnings denied)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: Run unit + integration tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets --target ${{ matrix.target }}
 
       - name: Doc tests
-        run: cargo test --doc
+        run: cargo test --doc --target ${{ matrix.target }}
 
       # The `e2e` tests cannot run without an iPhone, but a broken e2e test
       # file should still fail CI — so compile-check it without running.
       - name: Compile-check e2e tests
-        run: cargo test --features e2e --no-run
+        run: cargo test --features e2e --no-run --target ${{ matrix.target }}
 
   # Cross-platform compile gate (issue #13): quokka is macOS-first, but
   # `cargo install --git` from source must keep working on Windows and Linux,
