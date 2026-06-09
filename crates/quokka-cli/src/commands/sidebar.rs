@@ -754,17 +754,21 @@ fn platform_color(platform: Platform) -> Color {
     }
 }
 
-/// Redirects the process stderr fd to `/dev/null` while alive, restoring it on
-/// drop. The sidebar runs background device loads and an inline media walk while
-/// it owns the alt screen; those log best-effort warnings to stderr (`afc_walk`
+/// Silences the process's stderr while alive, restoring it on drop. The
+/// sidebar runs background device loads and an inline media walk while it owns
+/// the alt screen; those log best-effort warnings to stderr (`afc_walk`
 /// skips, enrichment failures) that would otherwise scribble over the ratatui
-/// frame and desync its diff renderer. `None` (e.g. fd ops failed) is harmless —
-/// the warnings just aren't suppressed.
+/// frame and desync its diff renderer. `None` (e.g. the redirect failed) is
+/// harmless — the warnings just aren't suppressed.
+///
+/// On Unix this redirects fd 2 to `/dev/null`.
+#[cfg(unix)]
 struct SilencedStderr {
     /// A dup of the original stderr, restored over fd 2 on drop.
     original: i32,
 }
 
+#[cfg(unix)]
 impl SilencedStderr {
     fn new() -> Option<Self> {
         // SAFETY: all calls operate on the process's own stderr fd. `dup`
@@ -787,12 +791,84 @@ impl SilencedStderr {
     }
 }
 
+#[cfg(unix)]
 impl Drop for SilencedStderr {
     fn drop(&mut self) {
         // SAFETY: restore the saved stderr over fd 2 and release the dup.
         unsafe {
             libc::dup2(self.original, libc::STDERR_FILENO);
             libc::close(self.original);
+        }
+    }
+}
+
+/// Silences the process's stderr while alive, restoring it on drop. See the
+/// Unix variant above for why the sidebar needs this.
+///
+/// On Windows there is no fd 2 to `dup2` over: Rust's `eprintln!` writes
+/// through the console handle it gets from `GetStdHandle(STD_ERROR_HANDLE)`
+/// on every write, so pointing `STD_ERROR_HANDLE` at the `NUL` device via
+/// `SetStdHandle` silences it immediately ([issue #13]).
+///
+/// [issue #13]: https://github.com/dutradotdev/quokka/issues/13
+#[cfg(windows)]
+struct SilencedStderr {
+    /// The original `STD_ERROR_HANDLE` (owned by the console, never closed),
+    /// restored on drop.
+    original: windows_sys::Win32::Foundation::HANDLE,
+    /// The open `NUL` handle stderr points at while silenced; closed on drop.
+    devnull: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl SilencedStderr {
+    fn new() -> Option<Self> {
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
+
+        /// `"NUL"` as a NUL-terminated UTF-16 path for `CreateFileW`.
+        const NUL_DEVICE: [u16; 4] = [b'N' as u16, b'U' as u16, b'L' as u16, 0];
+
+        // SAFETY: all calls operate on the process's own std handles. The
+        // original handle is saved but never closed (the console owns it);
+        // the NUL handle stays open while it backs STD_ERROR_HANDLE and is
+        // closed only after the original is restored on drop.
+        unsafe {
+            let original = GetStdHandle(STD_ERROR_HANDLE);
+            let devnull = CreateFileW(
+                NUL_DEVICE.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            if devnull == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            if SetStdHandle(STD_ERROR_HANDLE, devnull) == 0 {
+                CloseHandle(devnull);
+                return None;
+            }
+            Some(Self { original, devnull })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SilencedStderr {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        // SAFETY: restore the saved handle over STD_ERROR_HANDLE, then close
+        // the NUL handle nothing references anymore.
+        unsafe {
+            SetStdHandle(STD_ERROR_HANDLE, self.original);
+            CloseHandle(self.devnull);
         }
     }
 }
