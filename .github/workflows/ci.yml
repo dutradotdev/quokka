@@ -64,6 +64,38 @@ jobs:
       - name: Compile-check e2e tests
         run: cargo test --features e2e --no-run
 
+  # Cross-platform compile gate (issue #13): quokka is macOS-first, but
+  # `cargo install --git` from source must keep working on Windows and Linux,
+  # and quokka-core is a dependency of the Windows GUI. Native runners compile
+  # the whole graph — a macOS cross-check can't, because `aws-lc-sys` needs the
+  # target platform's C toolchain and headers. Clippy with warnings denied
+  # compile-checks every target (tests included) without running anything.
+  cross-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # aws-lc-sys assembles its crypto primitives with NASM on Windows; the
+      # runner image doesn't ship it.
+      - name: Install NASM (aws-lc-sys build dep on Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --all-targets -- -D warnings
+
   # Supply-chain hygiene: cargo-audit catches CVEs in transitive deps,
   # cargo-deny enforces license + duplicate-version policy from `deny.toml`.
   # Runs in parallel with the test job so it doesn't slow regression feedback.
