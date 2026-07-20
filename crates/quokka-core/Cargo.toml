@@ -30,7 +30,7 @@ e2e-android = []
 # Pinned with `=` — the idevice crate warns of breaking changes at every point
 # release until 0.2.0. Re-run Prompt 0's research before bumping. The
 # `tools/src/` directory of the upstream repo is the canonical usage example.
-idevice = { version = "=0.1.61", default-features = false, features = [
+idevice = { version = "=0.1.65", default-features = false, features = [
     # Crypto backend for lockdown TLS. `aws-lc` is upstream's default; it
     # implies `rustls`. The other option would be `ring`.
     "aws-lc",
